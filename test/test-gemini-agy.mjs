@@ -66,7 +66,7 @@ const originalFetch = globalThis.fetch
 
   let src = readFileSync(fileURLToPath(new URL('../client/client.js', import.meta.url)), 'utf8')
   const marker = '    exports.apply = apply;'
-  src = src.replace(marker, `    exports.__test = { modelToPlatform, isRelayProvider, barAmountText, formatMoney };\n` + marker)
+  src = src.replace(marker, `    exports.__test = { modelToPlatform, isRelayProvider, barAmountText, formatMoney, whaleQuotaLines, updateWhaleContext };\n` + marker)
   new Function('window', 'document', 'navigator', 'localStorage', src)(globalThis.window, doc, { hardwareConcurrency: 8, language: 'zh-CN' }, globalThis.localStorage)
   const T = captured.__test
 
@@ -78,6 +78,28 @@ const originalFetch = globalThis.fetch
   a('formatMoney 70% 格式化正确', T.formatMoney(70, '%') === '70%')
   a('barAmountText ok状态下显示百分比', T.barAmountText({ status: 'ok', total: 70, currency: '%' }, (k) => k, false) === '70%')
   a('barAmountText viaRelay 时仍显示中转横杠', T.barAmountText({ status: 'ok', total: 70, currency: '%' }, (k) => k, true) === '—')
+
+  // 1.2 大肥鱼宠物配额与重置时间气泡生成测试
+  T.updateWhaleContext({
+    quota: {
+      platform: 'gemini',
+      name: 'Google Gemini',
+      status: 'ok',
+      total: 55,
+      currency: '%',
+      percent: 55,
+      resetAt: '2026-09-13T04:16:01Z',
+      account: 'user@example.com',
+    },
+  })
+  const qLines = T.whaleQuotaLines()
+  a('大肥鱼气泡生成 3 行结构', Array.isArray(qLines) && qLines.length === 3)
+  a('大肥鱼气泡标题包含 Google Gemini 配额', qLines[0].t.includes('Google Gemini 配额'))
+  a('大肥鱼气泡配额数值为 55%', qLines[1].t === '55%')
+  a('大肥鱼气泡数字样式标记为 B (大号)', qLines[1].s === 'B')
+  a('大肥鱼气泡重置时间说明存在', qLines[2].t.includes('重置') || qLines[2].t.includes('04:16'))
+  a('大肥鱼气泡账号信息存在', qLines[2].t.includes('user@example.com'))
+
   globalThis.fetch = originalFetch
 }
 

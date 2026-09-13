@@ -487,7 +487,7 @@ window.__ModuleLoader__.load({
 .dshadb-whale-img{width:100%;height:100%;object-fit:contain;display:block;pointer-events:none;-webkit-user-drag:none;filter:drop-shadow(0 6px 14px rgba(0,0,0,.18))}
 .dshadb-whale-bubble{position:absolute;left:50%;bottom:calc(100% + 6px);--dshw-bdx:0px;--dshw-btx:50%;transform:translateX(calc(-50% + var(--dshw-bdx))) translateY(10px) scale(.82);transform-origin:var(--dshw-btx) 100%;opacity:0;pointer-events:none;background:#fff;border-radius:16px;padding:10px 14px;min-width:112px;max-width:min(74vw,248px);box-shadow:0 8px 28px rgba(0,0,0,.16);transition:opacity .2s ease,transform .26s cubic-bezier(.34,1.5,.64,1);z-index:2;text-align:center;box-sizing:border-box}
 .dshadb-whale-bubble::after{content:"";position:absolute;left:var(--dshw-btx);top:100%;transform:translateX(-50%);border:8px solid transparent;border-top-color:#fff}
-.dshadb-whale-bubble-on{opacity:1;transform:translateX(calc(-50% + var(--dshw-bdx))) translateY(0) scale(1)}
+.dshadb-whale-bubble-on{opacity:1;pointer-events:auto;cursor:pointer;transform:translateX(calc(-50% + var(--dshw-bdx))) translateY(0) scale(1)}
 /* 连点时气泡不做淡出淡入的来回, 只跟位置走 —— 避免闪烁 */
 .dshadb-whale-bubble-on.dshadb-whale-bubble-keep{transition:transform .16s ease}
 /* 气泡在上方放不下时改到下方, 尾巴翻到顶边 */
@@ -1977,9 +1977,58 @@ window.__ModuleLoader__.load({
       scale: 1, soundOn: true, soundSet: "duck", volume: 0.5, bubbleOn: true,
       peakMode: "default", snapOn: true, peekRatio: 0.5, left: null, top: null, side: "right",
     };
-    var whaleCtxInfo = { isPeak: false };
+    var whaleCtxInfo = { isPeak: false, quota: null, clickCount: 0 };
     function updateWhaleContext(info) {
-      whaleCtxInfo = { isPeak: !!(info && info.isPeak) };
+      if (!info) return;
+      if (typeof info.isPeak === "boolean") whaleCtxInfo.isPeak = info.isPeak;
+      if (info.quota !== undefined) whaleCtxInfo.quota = info.quota;
+    }
+    function whaleFormatTimeRemaining(resetAt) {
+      if (!resetAt) return "";
+      try {
+        var target = new Date(resetAt).getTime();
+        var diff = target - Date.now();
+        var timeStr = new Date(target).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        if (diff <= 0) return timeStr + " (即将重置)";
+        var h = Math.floor(diff / 3600000);
+        var m = Math.floor((diff % 3600000) / 60000);
+        if (h > 0) return timeStr + " (" + h + "小时" + m + "分后重置)";
+        return timeStr + " (" + m + "分后重置)";
+      } catch (e) {
+        return "";
+      }
+    }
+    function getWhaleQuotaInfo() {
+      if (whaleCtxInfo && whaleCtxInfo.quota) return whaleCtxInfo.quota;
+      try {
+        var snap = store.getSnapshot();
+        var all = (snap && snap.balances) || [];
+        var gemini = all.find(function (b) { return b.platform === "gemini"; });
+        if (gemini && gemini.status === "ok") return gemini;
+        return all.find(function (b) { return b.status === "ok"; }) || null;
+      } catch (e) {
+        return null;
+      }
+    }
+    function whaleQuotaLines() {
+      var q = getWhaleQuotaInfo();
+      if (!q) return null;
+      var isPercent = q.currency === "%" || q.percent != null;
+      var val = typeof q.percent === "number" ? q.percent : (typeof q.total === "number" ? q.total : null);
+      var color = val == null ? "#9ca0aa" : (val > 50 ? "#2fa24c" : val > 20 ? "#faad14" : "#e0433f");
+      var title = q.platform === "gemini" ? "Google Gemini 配额" : (q.name || "模型配额");
+      var amountText = isPercent
+        ? (val != null ? Math.round(val) + "%" : "—")
+        : (q.total != null ? (q.currency === "USD" ? "$" : q.currency === "CNY" ? "¥" : (q.currency || "")) + q.total : "—");
+      var resetDesc = q.resetAt ? ("重置: " + whaleFormatTimeRemaining(q.resetAt)) : (q.note || "状态正常");
+      if (q.account && !resetDesc.includes(q.account)) {
+        resetDesc = resetDesc ? (resetDesc + " · " + q.account) : q.account;
+      }
+      return [
+        { t: title + ":", s: "A" },
+        { t: amountText, s: "B", c: color },
+        { t: resetDesc, s: "C", w: true },
+      ];
     }
     function whalePeakWords(peakMode, isPeak) {
       if (peakMode === "liangwen") return isPeak ? "梁文峰" : "梁文谷";
@@ -1989,7 +2038,17 @@ window.__ModuleLoader__.load({
     function whalePickOne(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
     // 台词组: [权重, 生成函数] —— 生成 {gif:true} 或 [{t,s,c}] 三行 (s: A小字 / B大字 / P峰谷 / C灰注)
     var WHALE_GROUPS = [
-      [40, function (st) {
+      [50, function (st) {
+        var qLines = whaleQuotaLines();
+        if (qLines) return qLines;
+        var isPeak = !!whaleCtxInfo.isPeak;
+        return [
+          { t: "当前时间段为:", s: "A" },
+          { t: whalePeakWords(st.peakMode, isPeak), s: "P", c: isPeak ? "#e0433f" : "#2fa24c" },
+          { t: isPeak ? "09:00~12:00 / 14:00~18:00" : "其余时段 / 周末全天", s: "C" },
+        ];
+      }],
+      [20, function (st) {
         var isPeak = !!whaleCtxInfo.isPeak;
         return [
           { t: "当前时间段为:", s: "A" },
@@ -2013,6 +2072,13 @@ window.__ModuleLoader__.load({
       [1, function () { return [null, { t: "哦鲸鲸... ", s: "B" }, null]; }],
     ];
     function whalePickLines(st) {
+      var q = getWhaleQuotaInfo();
+      whaleCtxInfo.clickCount = (whaleCtxInfo.clickCount || 0) + 1;
+      // 点击大肥鱼时：只要有配额，奇数次点击(如初次点开)优先展示配额卡片，偶数次轮播其他趣味台词
+      if (q && (whaleCtxInfo.clickCount % 2 === 1 || Math.random() < 0.6)) {
+        var qLines = whaleQuotaLines();
+        if (qLines) return qLines;
+      }
       var total = 0, i;
       for (i = 0; i < WHALE_GROUPS.length; i++) total += WHALE_GROUPS[i][0];
       var r = Math.random() * total;
@@ -2081,6 +2147,11 @@ window.__ModuleLoader__.load({
       gif.addEventListener("error", function () { gifBroken = true; });
       bubble.appendChild(gif);
       bubble.appendChild(bText);
+      bubble.addEventListener("pointerdown", function (e) {
+        e.stopPropagation();
+        openBubble();
+        armHide();
+      });
       root.appendChild(bubble);
       root.appendChild(sprite);
       // 初始化时禁用 CSS transition, 避免 left:0 → 实际位置 的 300ms 滑动动画
@@ -2570,10 +2641,16 @@ window.__ModuleLoader__.load({
             setWhaleLocked(false);
             return () => setWhaleLocked(false);
           }, []);
-          // 峰谷时段变化同步给挂件 (台词里的「当前时间段」用它, 不涉及任何金额)
+          // 峰谷时段与当前配额同步给挂件 (点击大肥鱼可查看当前配额与重置时间)
           react.useEffect(() => {
-            updateWhaleContext({ isPeak: !!(config && config.isPeak) });
-          }, [config && config.isPeak]);
+            const all = dashData.balances || [];
+            const geminiBal = all.find((b) => b.platform === "gemini");
+            const curBal = all.find((b) => b.platform === selectedId) || geminiBal;
+            updateWhaleContext({
+              isPeak: !!(config && config.isPeak),
+              quota: (curBal && curBal.status === "ok") ? curBal : geminiBal,
+            });
+          }, [config && config.isPeak, dashData.balances, selectedId]);
 
           const handleSelect = (id) => { setSelected(id); setSelectedId(id); };
 

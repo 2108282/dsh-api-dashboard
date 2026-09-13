@@ -1500,6 +1500,7 @@ export async function queryGeminiBalance(platform, apiKey, config = {}) {
             platform: platform.id, name: platform.label, icon: platform.icon, color: platform.color,
             category: platform.category, status: frac <= 0 ? 'error' : 'ok',
             total: pct, currency: '%', available: pct, percent: pct, resetAt: resetTime,
+            account: active.email || null,
             note: `Google 配额剩余 ${pct}%${resetInfo}${active.email ? ' [' + active.email + ']' : ''}`,
             noBalance: false, fetchedAt: Date.now(),
           }
@@ -1537,6 +1538,7 @@ export async function queryGeminiBalance(platform, apiKey, config = {}) {
               platform: platform.id, name: platform.label, icon: platform.icon, color: platform.color,
               category: platform.category, status: frac <= 0 ? 'error' : 'ok',
               total: pct, currency: '%', available: pct, percent: pct, resetAt: resetTime,
+              account: acc.email || null,
               note: `Google 配额剩余 ${pct}%${resetInfo}${acc.email ? ' [' + acc.email + ']' : ''}`,
               noBalance: false, fetchedAt: Date.now(),
             }
