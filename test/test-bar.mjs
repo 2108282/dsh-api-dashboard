@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 const react = {
   createElement:(t,p,...c)=>({type:t,props:p||{},children:(c.length===1&&Array.isArray(c[0])?c[0]:c).flat(Infinity).filter(x=>x!=null&&x!==false)}),
   useState:(i)=>[i,()=>{}], useRef:(i)=>({current:i}), useEffect:()=>{}, useMemo:(f)=>f(), useCallback:(f)=>f, useSyncExternalStore:(s,g)=>g(),
@@ -14,7 +15,7 @@ globalThis.requestAnimationFrame=(f)=>{f(0);return 1}
 globalThis.cancelAnimationFrame=()=>{}
 let captured=null
 globalThis.window.__ModuleLoader__={load({factory}){captured=factory((n)=>{if(n==='react')return react;if(n==='@deepseek-ai/dsh-client-ui-primitives')return {};throw new Error('未知依赖 '+n)})}}
-let src=readFileSync(new URL('../client/client.js', import.meta.url).pathname, 'utf8')
+let src=readFileSync(fileURLToPath(new URL('../client/client.js', import.meta.url)), 'utf8')
 const marker='    exports.apply = apply;'
 src=src.replace(marker,`    exports.__test = { modelToPlatform, isRelayProvider, barAmountText, buildSubagentRow, formatSessionCost };
 `+marker)

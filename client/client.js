@@ -918,6 +918,8 @@ window.__ModuleLoader__.load({
     function isRelayProvider(provider, config) {
       if (typeof provider !== "string" || provider === "") return false;
       const p = provider.toLowerCase();
+      // dsh-agy 运行在本地环境, 为直连 Google Antigravity 服务
+      if (p === "agy" || p === "antigravity") return false;
       // 第 1 层: 用户显式名单
       const official = config && config.officialProviders;
       if (Array.isArray(official)) {

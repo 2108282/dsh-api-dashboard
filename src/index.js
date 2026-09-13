@@ -730,7 +730,13 @@ const readSettingsDerived = () => {
 }
 
 /** 读 settings.yaml 算第 2 层判定 */
-const readProviderKinds = () => readSettingsDerived().kinds
+const readProviderKinds = () => {
+  const kinds = { ...readSettingsDerived().kinds }
+  // dsh-agy 运行在同一 DSH 环境中, 为直连 Google Antigravity 服务, 判为 official 免被误判中转站
+  kinds['agy'] = 'official'
+  kinds['antigravity'] = 'official'
+  return kinds
+}
 
 // ============================================================
 // 工具函数
@@ -1114,7 +1120,7 @@ const cleanUrl = (value) => {
  *  id / label / icon(图标文件名) / color / category(官方|海外|国内|本地|中转站)
  *  baseUrl / queryType(余额解析类型) / envKeys(可读取的key名) / noBalance(是否默认无余额接口)
  */
-const PLATFORM_PRESETS = [
+export const PLATFORM_PRESETS = [
   // ===== 国内平台（有公开余额/配额查询接口）=====
   { id: 'deepseek', label: 'DeepSeek', icon: 'deepseek', color: '#4D6BFE', category: '国内',
     baseUrl: 'https://api.deepseek.com', queryType: 'deepseek', envKeys: ['DEEPSEEK_API_KEY'] },
@@ -1141,7 +1147,8 @@ const PLATFORM_PRESETS = [
   // ===== 著名模型品牌 (无公开余额接口, 仅显示模型 + 按价格表估算消耗) =====
   { id: 'openai', label: 'OpenAI', icon: 'openai', color: '#10A37F', category: '海外', noBalance: true },
   { id: 'claude', label: 'Anthropic Claude', icon: 'claude', color: '#D97757', category: '海外', noBalance: true },
-  { id: 'gemini', label: 'Google Gemini', icon: 'gemini', color: '#4285F4', category: '海外', noBalance: true },
+  { id: 'gemini', label: 'Google Gemini', icon: 'gemini', color: '#4285F4', category: '海外',
+    baseUrl: 'https://generativelanguage.googleapis.com', queryType: 'gemini', envKeys: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'] },
   { id: 'qwen', label: '通义千问 Qwen', icon: 'qwen', color: '#623AE7', category: '国内', noBalance: true },
   { id: 'mimo', label: '小米 MiMo', icon: 'mimo', color: '#FF6900', category: '国内', noBalance: true },
   // v1.2.1: 豆包/混元入列模型品牌分组 (价格表 v1.2.0 已覆盖, 此前只算价不显示)
@@ -1452,9 +1459,143 @@ export function classifyBizError(queryType, json) {
 }
 
 // ============================================================
+// 查询 Google Gemini 额度 (支持与 dsh-agy 联动及官方 Key 探测)
+// ============================================================
+export async function queryGeminiBalance(platform, apiKey, config = {}) {
+  const home = config.dshHome || process.env.DSH_HOME || join(homedir(), '.dsh')
+  const agyApiUrl = config.agyApiUrl || 'http://127.0.0.1:3080/agy/api/accounts'
+
+  // 1. 优先尝试与本地 dsh-agy 插件/服务联动
+  // A: 优先请求 dsh-agy 的 web 路由获取实时每模型配额
+  try {
+    const bridgeTokenPath = join(home, '.bridge_token')
+    let bridgeToken = ''
+    if (existsSync(bridgeTokenPath)) {
+      try { bridgeToken = readFileSync(bridgeTokenPath, 'utf8').trim() } catch {}
+    }
+    const headers = { Accept: 'application/json' }
+    if (bridgeToken) headers['x-dsha-token'] = bridgeToken
+
+    const timeout = Math.min(config.timeoutMs || 8000, 3000)
+    const res = await fetchWithTimeout(agyApiUrl, headers, timeout)
+    if (res.ok) {
+      const data = await res.json()
+      const accounts = Array.isArray(data?.accounts) ? data.accounts : []
+      const active = accounts.find((a) => a?.active && a?.state === 'active') || accounts.find((a) => a?.enabled !== false) || accounts[0]
+      if (active) {
+        if (active.state === 'disabled') {
+          return {
+            platform: platform.id, name: platform.label, icon: platform.icon, color: platform.color,
+            category: platform.category, status: 'error', error: 'agy 账号已禁用', noBalance: false,
+          }
+        }
+        const models = Array.isArray(active.quota?.models) ? active.quota.models : []
+        const geminiModel = models.find((m) => m && typeof m.id === 'string' && m.id.startsWith('gemini'))
+        if (geminiModel && typeof geminiModel.remainingFraction === 'number') {
+          const frac = Math.max(0, Math.min(1, geminiModel.remainingFraction))
+          const pct = Math.round(frac * 100)
+          const resetTime = geminiModel.resetTime || null
+          const resetInfo = resetTime ? ` (重置于 ${new Date(resetTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})` : ''
+          return {
+            platform: platform.id, name: platform.label, icon: platform.icon, color: platform.color,
+            category: platform.category, status: frac <= 0 ? 'error' : 'ok',
+            total: pct, currency: '%', available: pct, percent: pct, resetAt: resetTime,
+            note: `Google 配额剩余 ${pct}%${resetInfo}${active.email ? ' [' + active.email + ']' : ''}`,
+            noBalance: false, fetchedAt: Date.now(),
+          }
+        }
+      }
+    }
+  } catch {
+    // 降级到本地文件直读
+  }
+
+  // B: 降级直读 ~/.dsh/agy-accounts.json
+  try {
+    const agyFile = config.agyAccountsFile || join(home, 'agy-accounts.json')
+    if (existsSync(agyFile)) {
+      const raw = readFileSync(agyFile, 'utf8')
+      const data = JSON.parse(raw)
+      const accounts = Array.isArray(data?.accounts) ? data.accounts : []
+      const activeIdx = typeof data?.activeIndex === 'number' ? data.activeIndex : 0
+      const acc = accounts[activeIdx] || accounts.find((a) => a?.enabled !== false) || accounts[0]
+      if (acc) {
+        if (acc.enabled === false) {
+          return {
+            platform: platform.id, name: platform.label, icon: platform.icon, color: platform.color,
+            category: platform.category, status: 'error', error: 'agy 账号已禁用', noBalance: false,
+          }
+        }
+        if (acc.cachedQuota) {
+          const googleQuota = acc.cachedQuota.google || acc.cachedQuota.gemini
+          if (googleQuota && typeof googleQuota.remainingFraction === 'number') {
+            const frac = Math.max(0, Math.min(1, googleQuota.remainingFraction))
+            const pct = Math.round(frac * 100)
+            const resetTime = googleQuota.resetTime || null
+            const resetInfo = resetTime ? ` (重置于 ${new Date(resetTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})` : ''
+            return {
+              platform: platform.id, name: platform.label, icon: platform.icon, color: platform.color,
+              category: platform.category, status: frac <= 0 ? 'error' : 'ok',
+              total: pct, currency: '%', available: pct, percent: pct, resetAt: resetTime,
+              note: `Google 配额剩余 ${pct}%${resetInfo}${acc.email ? ' [' + acc.email + ']' : ''}`,
+              noBalance: false, fetchedAt: Date.now(),
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // 忽略异常
+  }
+
+  // 2. 官方 API Key 探测方案 (未找到 agy 账号时)
+  if (apiKey) {
+    try {
+      const probeUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`
+      const res = await fetchWithTimeout(probeUrl, { Accept: 'application/json' }, config.timeoutMs || 8000)
+      if (res.ok) {
+        return {
+          platform: platform.id, name: platform.label, icon: platform.icon, color: platform.color,
+          category: platform.category, status: 'ok', total: 100, currency: '%', available: 100,
+          percent: 100, note: 'API Key 有效 (官方未开放余额数值接口)', noBalance: false, fetchedAt: Date.now(),
+        }
+      }
+      if (res.status === 400 || res.status === 401 || res.status === 403) {
+        return {
+          platform: platform.id, name: platform.label, icon: platform.icon, color: platform.color,
+          category: platform.category, status: 'auth-error', error: `HTTP ${res.status} (API Key 无效或未授权)`,
+          noBalance: false,
+        }
+      }
+      if (res.status === 429) {
+        return {
+          platform: platform.id, name: platform.label, icon: platform.icon, color: platform.color,
+          category: platform.category, status: 'error', error: 'HTTP 429 (配额超限/限流)', noBalance: false,
+        }
+      }
+    } catch (error) {
+      return {
+        platform: platform.id, name: platform.label, icon: platform.icon, color: platform.color,
+        category: platform.category, status: 'error', error: error instanceof Error ? error.message : String(error),
+        noBalance: false,
+      }
+    }
+  }
+
+  // 3. 既无 agy，也无 Key
+  return {
+    platform: platform.id, name: platform.label, icon: platform.icon, color: platform.color,
+    category: platform.category, status: 'no-key', error: '未配置 API Key 或未登录 dsh-agy 账号', noBalance: false,
+  }
+}
+
+// ============================================================
 // 查询单个预设平台
 // ============================================================
 async function queryPreset(platform, apiKey, config) {
+  if (platform.queryType === 'gemini') {
+    return await queryGeminiBalance(platform, apiKey, config)
+  }
   if (platform.noBalance) {
     return {
       platform: platform.id, name: platform.label, icon: platform.icon, color: platform.color,

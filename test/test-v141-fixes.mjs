@@ -5,11 +5,12 @@
 const fs = await import('node:fs')
 const os = await import('node:os')
 const path = await import('node:path')
+const { fileURLToPath } = await import('node:url')
 const { mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync, readFileSync } = fs
 let pass = 0, fail = 0
 const a = (name, cond, extra) => { if (cond) { pass++ } else { fail++; console.log('FAIL ' + name + (extra ? '  ' + extra : '')) } }
 
-const ROOT = path.resolve(new URL('..', import.meta.url).pathname)
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const src = readFileSync(path.join(ROOT, 'src/index.js'), 'utf8')
 const cli = readFileSync(path.join(ROOT, 'client/client.js'), 'utf8')
 
