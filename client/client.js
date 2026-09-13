@@ -690,7 +690,8 @@ window.__ModuleLoader__.load({
           appliedSeq = mySeq;
           if (data.config?.clientPollIntervalMs >= 1000) pollMs = Math.min(data.config.clientPollIntervalMs, 3600000);
           // v0.5.0 性能适配: 内容无变化就不重建快照引用, useSyncExternalStore 判定 Object.is 相同直接跳过整棵树重渲
-          const newBalances = data.balances || [];
+          let newBalances = data.balances || [];
+          newBalances = await syncAgyQuotaClient(newBalances);
           const oldBalances = Array.isArray(snapshot.balances) ? snapshot.balances : [];
           const changed = JSON.stringify(newBalances) !== JSON.stringify(oldBalances) || snapshot.status !== "ok";
           const nextFetchedAt = data.fetchedAt || Date.now();
@@ -713,6 +714,55 @@ window.__ModuleLoader__.load({
         inflight = null; notify();
       })();
       return inflight;
+    }
+    async function syncAgyQuotaClient(balances) {
+      try {
+        let gemini = balances.find((b) => b.platform === "gemini");
+        if (gemini && gemini.status === "ok" && typeof gemini.total === "number" && gemini.total > 0) {
+          return balances;
+        }
+        const res = await fetchT("/agy/api/accounts", { headers: { accept: "application/json" } }, 2500);
+        if (!res.ok) return balances;
+        const agyData = await res.json();
+        const accounts = Array.isArray(agyData?.accounts) ? agyData.accounts : [];
+        const active = accounts.find((a) => a?.active && a?.state === "active") || accounts.find((a) => a?.enabled !== false) || accounts[0];
+        if (!active) return balances;
+        const models = Array.isArray(active.quota?.models) ? active.quota.models : [];
+        const geminiModel = models.find((m) => m && typeof m.id === "string" && m.id.startsWith("gemini"));
+        if (!geminiModel || typeof geminiModel.remainingFraction !== "number") return balances;
+
+        const frac = Math.max(0, Math.min(1, geminiModel.remainingFraction));
+        const pct = Math.round(frac * 100);
+        const resetTime = geminiModel.resetTime || null;
+        const timeStr = resetTime ? new Date(resetTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+        const resetInfo = timeStr ? ` (重置于 ${timeStr})` : '';
+
+        const patch = {
+          platform: "gemini",
+          name: "Google Gemini",
+          icon: "gemini",
+          color: "#4285F4",
+          category: "海外",
+          status: frac <= 0 ? "error" : "ok",
+          total: pct,
+          currency: "%",
+          available: pct,
+          percent: pct,
+          resetAt: resetTime,
+          account: active.email || null,
+          note: `Google 配额剩余 ${pct}%${resetInfo}${active.email ? " [" + active.email + "]" : ""}`,
+          noBalance: false,
+          fetchedAt: Date.now(),
+        };
+
+        const out = balances.slice();
+        const idx = out.findIndex((b) => b.platform === "gemini");
+        if (idx >= 0) out[idx] = { ...out[idx], ...patch };
+        else out.push(patch);
+        return out;
+      } catch (e) {
+        return balances;
+      }
     }
     function schedule() {
       if (timer !== null) return;
@@ -1477,8 +1527,30 @@ window.__ModuleLoader__.load({
       // v1.1.0: 大肥鱼细项 (独立页签, 走 /api-dashboard/whale/settings, 与看板主配置分开)
       const [wf, setWf] = react.useState({
         scale: 1, peekRatio: 0.5, soundOn: true, soundSet: "duck",
-        volume: 0.5, bubbleOn: true, peakMode: "default", snapOn: true,
+        volume: 0.5, bubbleOn: true, peakMode: "default", snapOn: true, quotaOn: true,
       });
+      const [agyInfo, setAgyInfo] = react.useState(null);
+      react.useEffect(() => {
+        if (!isOpen) return;
+        fetchT("/agy/api/accounts", { headers: { accept: "application/json" } }, 3000)
+          .then((r) => r.json())
+          .then((d) => {
+            const accs = Array.isArray(d?.accounts) ? d.accounts : [];
+            const act = accs.find((a) => a?.active && a?.state === "active") || accs.find((a) => a?.enabled !== false) || accs[0];
+            if (act) {
+              const gm = act.quota?.models?.find((m) => m.id && m.id.startsWith("gemini"));
+              const frac = gm && typeof gm.remainingFraction === "number" ? gm.remainingFraction : null;
+              setAgyInfo({
+                email: act.email || "(默认项目)",
+                pct: frac != null ? Math.round(frac * 100) : null,
+                resetAt: gm?.resetTime || null,
+                state: act.state || "active",
+                totalAccounts: accs.length,
+              });
+            }
+          })
+          .catch(() => {});
+      }, [isOpen]);
       const [form, setForm] = react.useState({ name: "", baseUrl: "", apiKey: "", queryType: "auto" });
       const [mform, setMform] = react.useState({ name: "", apiUrl: "", apiKey: "", queryType: "auto", totalPath: "", usedPath: "", currency: "" });
       const [loading, setLoading] = react.useState(false);
@@ -1694,6 +1766,43 @@ window.__ModuleLoader__.load({
             react.createElement("span", { style: { fontSize: "10px", color: "var(--dsw-alias-label-tertiary)" }, key: "rf_h" }, t("settings.refreshHint")),
           ]),
         ]),
+        // Google Antigravity (dsh-agy) 状态卡片
+        react.createElement("div", {
+          key: "agy_box",
+          style: {
+            margin: "8px 0 12px",
+            padding: "10px 12px",
+            background: "rgba(66, 133, 244, 0.08)",
+            border: "1px solid rgba(66, 133, 244, 0.25)",
+            borderRadius: "8px",
+          },
+        }, [
+          react.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }, key: "h" }, [
+            react.createElement("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, key: "tbox" }, [
+              react.createElement("span", { style: { width: "7px", height: "7px", borderRadius: "50%", background: agyInfo ? "#2fa24c" : "#9ca0aa", display: "inline-block" }, key: "dot" }),
+              react.createElement("span", { style: { fontWeight: "700", fontSize: "12.5px", color: "#4285F4" }, key: "t" }, "Google Antigravity (dsh-agy)"),
+            ]),
+            react.createElement("a", {
+              href: "/agy", target: "_blank",
+              style: { fontSize: "11px", color: "#fff", background: "#4285F4", padding: "2px 8px", borderRadius: "5px", textDecoration: "none", fontWeight: "600" },
+              key: "btn",
+            }, "打开控制台 ↗"),
+          ]),
+          react.createElement("div", { style: { fontSize: "11.5px", color: "var(--dsw-alias-label-secondary)", lineHeight: "1.5" }, key: "body" },
+            agyInfo ? [
+              react.createElement("div", { key: "row1" }, [
+                react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)" }, key: "l1" }, "生效账号: "),
+                react.createElement("strong", { key: "e1" }, agyInfo.email),
+                react.createElement("span", { style: { marginLeft: "6px", color: "#2fa24c", fontSize: "10.5px" }, key: "st" }, "● 活跃"),
+              ]),
+              react.createElement("div", { key: "row2" }, [
+                react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)" }, key: "l2" }, "Gemini 剩余配额: "),
+                react.createElement("strong", { style: { color: agyInfo.pct > 50 ? "#2fa24c" : agyInfo.pct > 20 ? "#faad14" : "#e0433f" }, key: "p2" }, agyInfo.pct != null ? (agyInfo.pct + "%") : "同步中..."),
+                agyInfo.resetAt ? react.createElement("span", { style: { marginLeft: "6px", color: "var(--dsw-alias-label-tertiary)", fontSize: "10.5px" }, key: "r2" }, "(重置: " + new Date(agyInfo.resetAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) + ")") : null,
+              ]),
+            ] : "正在读取本地 Antigravity 账号数据..."
+          ),
+        ]),
         // 无余额模型品牌开关
         react.createElement("div", { className: "dshadb_settings_row", key: "brands", style: { margin: "2px 0 10px" } }, [
           react.createElement("div", { className: "dshadb_settings_row_main", key: "bm" }, [
@@ -1895,6 +2004,8 @@ window.__ModuleLoader__.load({
           react.createElement("div", { className: "dshadb_wf_tip", key: "snaphint", style: { margin: "-2px 0 8px" } }, t("whale.snapHint")),
           wfSeg("bubble", t("whale.bubble"), [[true, t("whale.on")], [false, t("whale.off")]], wf.bubbleOn,
             (v) => patchWf({ bubbleOn: v })),
+          wfSeg("quota", "气泡展示配额", [[true, t("whale.on")], [false, t("whale.off")]], wf.quotaOn !== false,
+            (v) => patchWf({ quotaOn: v })),
           wfSeg("peak", t("whale.peakMode"), [
             ["default", t("whale.peak.default")], ["liangwen", t("whale.peak.liangwen")], ["qiangqiang", t("whale.peak.qiangqiang")],
           ], wf.peakMode, (v) => patchWf({ peakMode: v })),
@@ -2012,14 +2123,13 @@ window.__ModuleLoader__.load({
     }
     function whaleQuotaLines() {
       var q = getWhaleQuotaInfo();
-      if (!q) return null;
+      if (!q || q.status !== "ok") return null;
       var isPercent = q.currency === "%" || q.percent != null;
       var val = typeof q.percent === "number" ? q.percent : (typeof q.total === "number" ? q.total : null);
-      var color = val == null ? "#9ca0aa" : (val > 50 ? "#2fa24c" : val > 20 ? "#faad14" : "#e0433f");
+      if (val === null || isNaN(val)) return null;
+      var color = val > 50 ? "#2fa24c" : val > 20 ? "#faad14" : "#e0433f";
       var title = q.platform === "gemini" ? "Google Gemini 配额" : (q.name || "模型配额");
-      var amountText = isPercent
-        ? (val != null ? Math.round(val) + "%" : "—")
-        : (q.total != null ? (q.currency === "USD" ? "$" : q.currency === "CNY" ? "¥" : (q.currency || "")) + q.total : "—");
+      var amountText = isPercent ? (Math.round(val) + "%") : ((q.currency === "USD" ? "$" : q.currency === "CNY" ? "¥" : (q.currency || "")) + val);
       var resetDesc = q.resetAt ? ("重置: " + whaleFormatTimeRemaining(q.resetAt)) : (q.note || "状态正常");
       if (q.account && !resetDesc.includes(q.account)) {
         resetDesc = resetDesc ? (resetDesc + " · " + q.account) : q.account;
@@ -2038,9 +2148,11 @@ window.__ModuleLoader__.load({
     function whalePickOne(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
     // 台词组: [权重, 生成函数] —— 生成 {gif:true} 或 [{t,s,c}] 三行 (s: A小字 / B大字 / P峰谷 / C灰注)
     var WHALE_GROUPS = [
-      [50, function (st) {
-        var qLines = whaleQuotaLines();
-        if (qLines) return qLines;
+      [35, function (st) {
+        if (st && st.quotaOn === false) return null;
+        return whaleQuotaLines();
+      }],
+      [30, function (st) {
         var isPeak = !!whaleCtxInfo.isPeak;
         return [
           { t: "当前时间段为:", s: "A" },
@@ -2048,42 +2160,33 @@ window.__ModuleLoader__.load({
           { t: isPeak ? "09:00~12:00 / 14:00~18:00" : "其余时段 / 周末全天", s: "C" },
         ];
       }],
-      [20, function (st) {
-        var isPeak = !!whaleCtxInfo.isPeak;
-        return [
-          { t: "当前时间段为:", s: "A" },
-          { t: whalePeakWords(st.peakMode, isPeak), s: "P", c: isPeak ? "#e0433f" : "#2fa24c" },
-          { t: isPeak ? "09:00~12:00 / 14:00~18:00" : "其余时段 / 周末全天", s: "C" },
-        ];
-      }],
-      [10, function () { return { gif: true }; }],
-      [8, function () { return [null, { t: whalePickOne(["好模型... ↓", "好女孩...↓"]), s: "B" }, null]; }],
-      [8, function () {
+      [15, function () { return { gif: true }; }],
+      [10, function () { return [null, { t: whalePickOne(["好模型... ↓", "好女孩...↓"]), s: "B" }, null]; }],
+      [10, function () {
         return [null, { t: whalePickOne([
           "不知道用户有什么用，先赶走吧~", "我...我...我也要挣钱吗？", "我去吃饭啦，测完叫我",
           "压力一只蓝色大肥鱼？！", "DeepSleep...", "坏了...用户彻底怒了！",
           "摸头摸头~ 再摸摸嘛", "尾巴被你拖到墙角啦", "偷看你打代码半天啦",
         ]), s: "A", w: true }, null]; }],
-      [4, function () {
+      [5, function () {
         return [null, { t: whalePickOne([
           "你目录里的dsh是什么...大烧货吗...?", "恭喜你实现token自由！token全跑了！", "真当我是便宜货啊...",
         ]), s: "A", w: true }, null]; }],
-      [2, function () { return [{ t: "这个", s: "A" }, { t: "凶", s: "B" }, { t: "是什么意思呀...", s: "A" }]; }],
-      [1, function () { return [null, { t: "哦鲸鲸... ", s: "B" }, null]; }],
+      [3, function () { return [{ t: "这个", s: "A" }, { t: "凶", s: "B" }, { t: "是什么意思呀...", s: "A" }]; }],
+      [2, function () { return [null, { t: "哦鲸鲸... ", s: "B" }, null]; }],
     ];
     function whalePickLines(st) {
-      var q = getWhaleQuotaInfo();
-      whaleCtxInfo.clickCount = (whaleCtxInfo.clickCount || 0) + 1;
-      // 点击大肥鱼时：只要有配额，奇数次点击(如初次点开)优先展示配额卡片，偶数次轮播其他趣味台词
-      if (q && (whaleCtxInfo.clickCount % 2 === 1 || Math.random() < 0.6)) {
-        var qLines = whaleQuotaLines();
-        if (qLines) return qLines;
-      }
       var total = 0, i;
       for (i = 0; i < WHALE_GROUPS.length; i++) total += WHALE_GROUPS[i][0];
       var r = Math.random() * total;
-      for (i = 0; i < WHALE_GROUPS.length; i++) { r -= WHALE_GROUPS[i][0]; if (r < 0) return WHALE_GROUPS[i][1](st); }
-      return WHALE_GROUPS[0][1](st);
+      for (i = 0; i < WHALE_GROUPS.length; i++) {
+        r -= WHALE_GROUPS[i][0];
+        if (r < 0) {
+          var res = WHALE_GROUPS[i][1](st);
+          if (res) return res;
+        }
+      }
+      return WHALE_GROUPS[1][1](st);
     }
 
     var whaleWidget = null;
