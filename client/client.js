@@ -376,6 +376,9 @@ window.__ModuleLoader__.load({
    整块（余额条 + 子代理行）**水平居中**：wrap 用 fit-content + margin:auto，
    子项 align-items:center，于是窄的时候两行都居中，宽的时候 wrap 撑到 100% 子代理行在内部横滑。 */
 .dshadb_barwrap{display:flex;flex-direction:column;align-items:center;gap:0;width:fit-content;max-width:100%;min-width:0;margin:0 auto}
+/* DSH 0.1.6 适配: 宿主 .dock 容器为单行横向 flex, 需允许折行并令看板独占完整一行排在第二行居中 */
+:has(> .dshadb_barwrap),[class*="_dock"]:has(.dshadb_barwrap){flex-wrap:wrap!important;row-gap:6px!important}
+.dshadb_barwrap{order:10!important;flex:0 0 100%!important;width:100%!important}
 .dshadb_barrow{display:inline-flex;align-items:center;gap:2px;max-width:100%;min-width:0}
 .dshadb_subs{display:flex;flex-wrap:nowrap;align-items:center;gap:4px;margin:3px 0 0 0;max-width:100%;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-ms-overflow-style:none;-webkit-overflow-scrolling:touch}
 /* UI v1.4.1: 子代理行只在**真的溢出**时右侧渐隐(由 syncSubsOverflow 打类名),
