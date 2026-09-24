@@ -79,7 +79,7 @@ const originalFetch = globalThis.fetch
   a('barAmountText ok状态下显示百分比', T.barAmountText({ status: 'ok', total: 70, currency: '%' }, (k) => k, false) === '70%')
   a('barAmountText viaRelay 时仍显示中转横杠', T.barAmountText({ status: 'ok', total: 70, currency: '%' }, (k) => k, true) === '—')
 
-  // 1.2 大肥鱼宠物配额与重置时间气泡生成测试
+  // 1.2 大肥鱼宠物配额与重置时间气泡生成测试 (新规范: 当前账号、5h配额、周配额)
   T.updateWhaleContext({
     quota: {
       platform: 'gemini',
@@ -90,15 +90,15 @@ const originalFetch = globalThis.fetch
       percent: 55,
       resetAt: '2026-09-13T04:16:01Z',
       account: 'user@example.com',
+      h5Quota: { percent: 55, resetTime: '2026-09-13T04:16:01Z' },
+      weeklyQuota: { percent: 88, resetTime: '2026-09-20T04:16:01Z' },
     },
   })
   const qLines = T.whaleQuotaLines()
   a('大肥鱼气泡生成 3 行结构', Array.isArray(qLines) && qLines.length === 3)
-  a('大肥鱼气泡标题包含 Google Gemini 配额', qLines[0].t.includes('Google Gemini 配额'))
-  a('大肥鱼气泡配额数值为 55%', qLines[1].t === '55%')
-  a('大肥鱼气泡数字样式标记为 B (大号)', qLines[1].s === 'B')
-  a('大肥鱼气泡重置时间说明存在', qLines[2].t.includes('重置') || qLines[2].t.includes('04:16'))
-  a('大肥鱼气泡账号信息存在', qLines[2].t.includes('user@example.com'))
+  a('大肥鱼气泡第1行包含当前账号', qLines[0].t.includes('user@example.com'))
+  a('大肥鱼气泡第2行包含5h配额数值55%与重置时间', qLines[1].t.includes('5h') && qLines[1].t.includes('55%') && qLines[1].t.includes('04:16'))
+  a('大肥鱼气泡第3行包含周配额数值88%', qLines[2].t.includes('周') && qLines[2].t.includes('88%'))
 
   globalThis.fetch = originalFetch
 }
@@ -106,12 +106,29 @@ const originalFetch = globalThis.fetch
 // 2. 测试服务端 queryGeminiBalance 逻辑
 {
   const indexMod = await import(fileURLToPath(new URL('../src/index.js', import.meta.url)) + '?t=' + Date.now())
-  const { queryGeminiBalance, PLATFORM_PRESETS } = indexMod
+  const { queryGeminiBalance, extractAgyAccountQuota, PLATFORM_PRESETS } = indexMod
   const geminiPreset = PLATFORM_PRESETS.find((p) => p.id === 'gemini')
 
   a('PLATFORM_PRESETS 包含 gemini', !!geminiPreset)
   a('gemini 的 queryType 为 gemini', geminiPreset?.queryType === 'gemini')
   a('gemini noBalance 标志已解除', geminiPreset?.noBalance !== true)
+
+  // 2.0 extractAgyAccountQuota 纯函数测试
+  const qFromLimits = extractAgyAccountQuota({
+    cachedLimits: {
+      groups: [
+        {
+          name: 'Gemini Models',
+          windows: [
+            { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.654, resetTime: '2026-09-24T18:00:00Z' },
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.95, resetTime: '2026-09-30T00:00:00Z' },
+          ],
+        },
+      ],
+    },
+  })
+  a('extractAgyAccountQuota 成功解析 0.3.1 cachedLimits 5h窗口', qFromLimits?.percent === 65 && qFromLimits?.remainingFraction === 0.654)
+  a('extractAgyAccountQuota 提取重置时间正确', qFromLimits?.resetTime === '2026-09-24T18:00:00Z')
 
   // 2.1 既无 key 也无 agy 账号场景
   const tmpHome = path.join(os.tmpdir(), 'dshadb-test-gemini-' + Date.now())
@@ -147,6 +164,36 @@ const originalFetch = globalThis.fetch
     a('agy 缓存直读币种 currency === %', agyCachedRes.currency === '%')
     a('agy 缓存直读 resetAt 正确', agyCachedRes.resetAt === '2026-09-13T06:00:00Z')
     a('agy 缓存直读 note 包含邮箱与百分比', agyCachedRes.note.includes('83%') && agyCachedRes.note.includes('test@example.com'))
+
+    // 2.2b 本地 agy-accounts.json 0.3.1 新版 cachedLimits 直读场景 (无 cachedQuota)
+    const mockAgy031Data = {
+      version: 4,
+      activeIndex: 0,
+      accounts: [
+        {
+          email: '031user@example.com',
+          enabled: true,
+          cachedLimits: {
+            groups: [
+              {
+                name: 'Gemini Models',
+                windows: [
+                  { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.21315, resetTime: '2026-09-24T12:08:17Z' },
+                  { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.789, resetTime: '2026-09-30T03:05:32Z' },
+                ],
+              },
+            ],
+            updatedAt: Date.now(),
+          },
+        },
+      ],
+    }
+    writeFileSync(path.join(tmpHome, 'agy-accounts.json'), JSON.stringify(mockAgy031Data))
+    const agy031Res = await queryGeminiBalance(geminiPreset, '', { dshHome: tmpHome, agyApiUrl: 'http://127.0.0.1:9999/none', timeoutMs: 100 })
+    a('0.3.1 cachedLimits 直读成功 status === ok', agy031Res.status === 'ok')
+    a('0.3.1 cachedLimits 百分比 total === 21', agy031Res.total === 21)
+    a('0.3.1 cachedLimits 包含 031 邮箱与百分比', agy031Res.note.includes('21%') && agy031Res.note.includes('031user@example.com'))
+    a('0.3.1 cachedLimits resetAt 存在', !!agy031Res.resetAt)
 
     // 2.3 账号禁用场景
     mockAgyData.accounts[0].enabled = false

@@ -1459,6 +1459,105 @@ export function classifyBizError(queryType, json) {
 }
 
 // ============================================================
+// 从 dsh-agy 账号中提取详细限额 (5h 小时额度 / weekly 周额度 / Claude & GPT 额度)
+// ============================================================
+export function extractAgyDetailedLimits(acc) {
+  if (!acc || typeof acc !== 'object') return null
+  const res = {
+    gemini5h: null,
+    geminiWeekly: null,
+    claude5h: null,
+    claudeWeekly: null,
+  }
+  if (acc.cachedLimits && Array.isArray(acc.cachedLimits.groups)) {
+    for (const group of acc.cachedLimits.groups) {
+      const gName = String(group?.name || '')
+      const isGemini = /gemini/i.test(gName)
+      const is3p = /claude|gpt|3p/i.test(gName)
+      for (const w of group.windows || []) {
+        if (!w || typeof w.remainingFraction !== 'number') continue
+        const frac = Math.max(0, Math.min(1, w.remainingFraction))
+        const pct = Math.round(frac * 100)
+        const item = {
+          percent: pct,
+          remainingFraction: frac,
+          resetTime: w.resetTime || null,
+          window: w.window || (w.bucketId && w.bucketId.includes('5h') ? '5h' : 'weekly'),
+        }
+        const is5h = item.window === '5h' || (w.bucketId && w.bucketId.includes('5h'))
+        const isWk = item.window === 'weekly' || (w.bucketId && w.bucketId.includes('weekly'))
+        if (isGemini) {
+          if (is5h && !res.gemini5h) res.gemini5h = item
+          else if (isWk && !res.geminiWeekly) res.geminiWeekly = item
+        } else if (is3p) {
+          if (is5h && !res.claude5h) res.claude5h = item
+          else if (isWk && !res.claudeWeekly) res.claudeWeekly = item
+        }
+      }
+    }
+  }
+  // 兼容旧版 cachedQuota (只有 google / anthropic)
+  if (!res.gemini5h && acc.cachedQuota && typeof acc.cachedQuota === 'object') {
+    const googleQuota = acc.cachedQuota.google || acc.cachedQuota.gemini
+    if (googleQuota && typeof googleQuota.remainingFraction === 'number') {
+      const frac = Math.max(0, Math.min(1, googleQuota.remainingFraction))
+      res.gemini5h = {
+        percent: Math.round(frac * 100),
+        remainingFraction: frac,
+        resetTime: googleQuota.resetTime || null,
+        window: '5h',
+      }
+    }
+    const ant = acc.cachedQuota.anthropic || acc.cachedQuota.claude
+    if (ant && typeof ant.remainingFraction === 'number') {
+      const frac = Math.max(0, Math.min(1, ant.remainingFraction))
+      res.claude5h = {
+        percent: Math.round(frac * 100),
+        remainingFraction: frac,
+        resetTime: ant.resetTime || null,
+        window: '5h',
+      }
+    }
+  }
+  return res
+}
+
+// ============================================================
+// 从 dsh-agy 账号中提取主 Gemini 配额信息 (兼容 0.3.1+ 与旧版)
+// ============================================================
+export function extractAgyAccountQuota(acc) {
+  if (!acc || typeof acc !== 'object') return null
+  const detailed = extractAgyDetailedLimits(acc)
+  if (detailed && detailed.gemini5h) {
+    return {
+      remainingFraction: detailed.gemini5h.remainingFraction,
+      percent: detailed.gemini5h.percent,
+      resetTime: detailed.gemini5h.resetTime || null,
+      window: '5h',
+      groupName: 'Gemini Models',
+      h5Quota: detailed.gemini5h,
+      weeklyQuota: detailed.geminiWeekly,
+      claude5h: detailed.claude5h,
+      claudeWeekly: detailed.claudeWeekly,
+    }
+  }
+  if (detailed && detailed.geminiWeekly) {
+    return {
+      remainingFraction: detailed.geminiWeekly.remainingFraction,
+      percent: detailed.geminiWeekly.percent,
+      resetTime: detailed.geminiWeekly.resetTime || null,
+      window: 'weekly',
+      groupName: 'Gemini Models',
+      h5Quota: null,
+      weeklyQuota: detailed.geminiWeekly,
+      claude5h: detailed.claude5h,
+      claudeWeekly: detailed.claudeWeekly,
+    }
+  }
+  return null
+}
+
+// ============================================================
 // 查询 Google Gemini 额度 (支持与 dsh-agy 联动及官方 Key 探测)
 // ============================================================
 export async function queryGeminiBalance(platform, apiKey, config = {}) {
@@ -1511,7 +1610,7 @@ export async function queryGeminiBalance(platform, apiKey, config = {}) {
     // 降级到本地文件直读
   }
 
-  // B: 降级直读 ~/.dsh/agy-accounts.json
+  // B: 降级直读 ~/.dsh/agy-accounts.json (支持 0.3.1 cachedLimits 与旧版 cachedQuota)
   try {
     const agyFile = config.agyAccountsFile || join(home, 'agy-accounts.json')
     if (existsSync(agyFile)) {
@@ -1527,22 +1626,33 @@ export async function queryGeminiBalance(platform, apiKey, config = {}) {
             category: platform.category, status: 'error', error: 'agy 账号已禁用', noBalance: false,
           }
         }
-        if (acc.cachedQuota) {
-          const googleQuota = acc.cachedQuota.google || acc.cachedQuota.gemini
-          if (googleQuota && typeof googleQuota.remainingFraction === 'number') {
-            const frac = Math.max(0, Math.min(1, googleQuota.remainingFraction))
-            const pct = Math.round(frac * 100)
-            const resetTime = googleQuota.resetTime || null
-            const resetInfo = resetTime ? ` (重置于 ${new Date(resetTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})` : ''
-            return {
-              platform: platform.id, name: platform.label, icon: platform.icon, color: platform.color,
-              category: platform.category, status: frac <= 0 ? 'error' : 'ok',
-              total: pct, currency: '%', available: pct, percent: pct, resetAt: resetTime,
-              account: acc.email || null,
-              note: `Google 配额剩余 ${pct}%${resetInfo}${acc.email ? ' [' + acc.email + ']' : ''}`,
-              noBalance: false, fetchedAt: Date.now(),
-            }
+        const q = extractAgyAccountQuota(acc)
+        if (q) {
+          const frac = q.remainingFraction
+          const pct = q.percent
+          const resetTime = q.resetTime || null
+          const resetInfo = resetTime ? ` (重置于 ${new Date(resetTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})` : ''
+          return {
+            platform: platform.id, name: platform.label, icon: platform.icon, color: platform.color,
+            category: platform.category, status: frac <= 0 ? 'error' : 'ok',
+            total: pct, currency: '%', available: pct, percent: pct, resetAt: resetTime,
+            account: acc.email || null,
+            h5Quota: q.h5Quota || null,
+            weeklyQuota: q.weeklyQuota || null,
+            claude5h: q.claude5h || null,
+            claudeWeekly: q.claudeWeekly || null,
+            note: `Google 配额剩余 ${pct}%${resetInfo}${acc.email ? ' [' + acc.email + ']' : ''}`,
+            noBalance: false, fetchedAt: Date.now(),
           }
+        }
+        return {
+          platform: platform.id, name: platform.label, icon: platform.icon, color: platform.color,
+          category: platform.category, status: 'ok',
+          total: 100, currency: '%', available: 100, percent: 100, resetAt: null,
+          account: acc.email || null,
+          h5Quota: null, weeklyQuota: null,
+          note: `Google 账号已就绪${acc.email ? ' [' + acc.email + ']' : ''} (配额同步中)`,
+          noBalance: false, fetchedAt: Date.now(),
         }
       }
     }
@@ -2628,6 +2738,81 @@ export function apply(ctx, config) {
         sendJson(res, 200, { ok: true, presets })
       },
     }), 'dsh-api-dashboard: platforms route')
+
+    // v1.4.5: 适配 dsh-agy 0.3.1 (读取全部账号详细限额与用量账本 stats)
+    const handleAgyAccounts = (req, res) => {
+      if (!allowRequest(req, res)) return
+      if (req.method !== 'GET') { res.writeHead(405, { Allow: 'GET' }); res.end(); return }
+      try {
+        const home = process.env.DSH_HOME || join(homedir(), '.dsh')
+        const agyFile = join(home, 'agy-accounts.json')
+        const statsFile = join(home, 'agy-stats.json')
+        let statsData = null
+        if (existsSync(statsFile)) {
+          try { statsData = JSON.parse(readFileSync(statsFile, 'utf8')) } catch {}
+        }
+
+        if (existsSync(agyFile)) {
+          const raw = readFileSync(agyFile, 'utf8')
+          const data = JSON.parse(raw)
+          const activeIdx = typeof data?.activeIndex === 'number' ? data.activeIndex : 0
+          const rawAccounts = Array.isArray(data?.accounts) ? data.accounts : []
+          const accounts = rawAccounts.map((acc, idx) => {
+            const q = extractAgyAccountQuota(acc)
+            const detailedLimits = extractAgyDetailedLimits(acc)
+            const models = []
+            if (q) {
+              models.push({
+                id: 'gemini',
+                remainingFraction: q.remainingFraction,
+                resetTime: q.resetTime,
+              })
+            }
+            const accStats = (statsData?.accounts && acc.email && statsData.accounts[acc.email]) ? statsData.accounts[acc.email] : null
+            return {
+              email: acc.email || '',
+              enabled: acc.enabled !== false,
+              active: idx === activeIdx,
+              state: acc.enabled === false ? 'disabled' : (acc.coolingDownUntil && acc.coolingDownUntil > Date.now()) ? 'cooling' : 'active',
+              coolingDownUntil: acc.coolingDownUntil || null,
+              cooldownReason: acc.cooldownReason || null,
+              quota: q ? {
+                remainingFraction: q.remainingFraction,
+                percent: q.percent,
+                resetTime: q.resetTime,
+                models,
+              } : null,
+              limits: detailedLimits,
+              stats: accStats,
+              cachedLimits: acc.cachedLimits || null,
+            }
+          })
+          sendJson(res, 200, {
+            ok: true,
+            activeIndex: activeIdx,
+            accounts,
+            totals: statsData?.totals || null,
+            statsSince: statsData?.since || null,
+          })
+        } else {
+          sendJson(res, 200, { ok: true, activeIndex: 0, accounts: [], totals: null })
+        }
+      } catch (err) {
+        sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) })
+      }
+    }
+
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact', path: '/api-dashboard/agy/accounts',
+      handler: handleAgyAccounts,
+    }), 'dsh-api-dashboard: agy accounts route')
+
+    try {
+      webCtx.effect(() => webCtx.webServer.register({
+        kind: 'exact', path: '/agy/api/accounts',
+        handler: handleAgyAccounts,
+      }), 'dsh-api-dashboard: legacy agy api accounts compatibility route')
+    } catch {}
 
     // v0.6.0: 更新检查 (GET) — 对比远端 main 版本, 5 分钟内存缓存, ?force=1 绕过
     webCtx.effect(() => webCtx.webServer.register({
