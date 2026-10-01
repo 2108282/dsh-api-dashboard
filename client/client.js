@@ -1594,7 +1594,7 @@ window.__ModuleLoader__.load({
           const d = await res.json();
           setAgyFullData(d);
           const accs = Array.isArray(d?.accounts) ? d.accounts : [];
-          const act = accs.find((a) => a?.active && a?.state === "active") || accs.find((a) => a?.enabled !== false) || accounts[0];
+          const act = accs.find((a) => a?.active && a?.state === "active") || accs.find((a) => a?.enabled !== false) || accs[0];
           if (act) {
             let frac = null;
             let resetTime = null;

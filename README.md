@@ -125,7 +125,7 @@ dsh plugin --profile web add link:/root/dsha-api-dashboard
 
 ## 更新日志
 
-最近一版 **v1.4.5** —— 适配 `dsh-agy` 0.3.1 架构升级：在设置中新设【agy】独立槽位直读全部账号状态、当前模型用量及 5h/周双配额；大肥鱼桌宠支持显示当前账号与双行配额/重置时间；解决管理设置跳转问题。一版一行的完整历史见 [`CHANGELOG.md`](CHANGELOG.md)。
+最近一版 **v1.4.6** —— 适配 `dsh-agy` 0.4.x 数据目录规范（支持 `~/.dsh/agy/` 专属目录与旧版平滑兼容），修复账号列表读取与前端变量作用域隐患。一版一行的完整历史见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## License
 

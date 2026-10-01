@@ -1459,6 +1459,24 @@ export function classifyBizError(queryType, json) {
 }
 
 // ============================================================
+// 定位 dsh-agy 数据文件路径 (兼容 0.4.x ~/.dsh/agy/ 与旧版 ~/.dsh/)
+// ============================================================
+export function resolveAgyFilePath(fileName, config = {}) {
+  if (fileName === 'agy-accounts.json' && config.agyAccountsFile) {
+    return config.agyAccountsFile
+  }
+  const home = config.dshHome || process.env.DSH_HOME || join(homedir(), '.dsh')
+  // 1. 优先尝试 dsh-agy 0.4.x 新版子目录: ~/.dsh/agy/<fileName>
+  const agySubdirPath = join(home, 'agy', fileName)
+  if (existsSync(agySubdirPath)) return agySubdirPath
+  // 2. 降级尝试旧版根目录: ~/.dsh/<fileName>
+  const legacyPath = join(home, fileName)
+  if (existsSync(legacyPath)) return legacyPath
+  // 默认返回新版规范路径
+  return agySubdirPath
+}
+
+// ============================================================
 // 从 dsh-agy 账号中提取详细限额 (5h 小时额度 / weekly 周额度 / Claude & GPT 额度)
 // ============================================================
 export function extractAgyDetailedLimits(acc) {
@@ -1610,9 +1628,9 @@ export async function queryGeminiBalance(platform, apiKey, config = {}) {
     // 降级到本地文件直读
   }
 
-  // B: 降级直读 ~/.dsh/agy-accounts.json (支持 0.3.1 cachedLimits 与旧版 cachedQuota)
+  // B: 降级直读 ~/.dsh/agy/agy-accounts.json (支持 0.4.x agy/ 目录、0.3.1 cachedLimits 与旧版 cachedQuota)
   try {
-    const agyFile = config.agyAccountsFile || join(home, 'agy-accounts.json')
+    const agyFile = resolveAgyFilePath('agy-accounts.json', config)
     if (existsSync(agyFile)) {
       const raw = readFileSync(agyFile, 'utf8')
       const data = JSON.parse(raw)
@@ -2739,14 +2757,14 @@ export function apply(ctx, config) {
       },
     }), 'dsh-api-dashboard: platforms route')
 
-    // v1.4.5: 适配 dsh-agy 0.3.1 (读取全部账号详细限额与用量账本 stats)
+    // v1.4.6: 适配 dsh-agy 0.4.x (支持 ~/.dsh/agy/ 子目录与 0.3.x 兼容，读取全部账号详细限额与用量账本 stats)
     const handleAgyAccounts = (req, res) => {
       if (!allowRequest(req, res)) return
       if (req.method !== 'GET') { res.writeHead(405, { Allow: 'GET' }); res.end(); return }
       try {
         const home = process.env.DSH_HOME || join(homedir(), '.dsh')
-        const agyFile = join(home, 'agy-accounts.json')
-        const statsFile = join(home, 'agy-stats.json')
+        const agyFile = resolveAgyFilePath('agy-accounts.json', { dshHome: home })
+        const statsFile = resolveAgyFilePath('agy-stats.json', { dshHome: home })
         let statsData = null
         if (existsSync(statsFile)) {
           try { statsData = JSON.parse(readFileSync(statsFile, 'utf8')) } catch {}

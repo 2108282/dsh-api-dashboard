@@ -106,12 +106,38 @@ const originalFetch = globalThis.fetch
 // 2. 测试服务端 queryGeminiBalance 逻辑
 {
   const indexMod = await import(fileURLToPath(new URL('../src/index.js', import.meta.url)) + '?t=' + Date.now())
-  const { queryGeminiBalance, extractAgyAccountQuota, PLATFORM_PRESETS } = indexMod
+  const { queryGeminiBalance, extractAgyAccountQuota, resolveAgyFilePath, PLATFORM_PRESETS } = indexMod
   const geminiPreset = PLATFORM_PRESETS.find((p) => p.id === 'gemini')
 
   a('PLATFORM_PRESETS 包含 gemini', !!geminiPreset)
   a('gemini 的 queryType 为 gemini', geminiPreset?.queryType === 'gemini')
   a('gemini noBalance 标志已解除', geminiPreset?.noBalance !== true)
+
+  // 1.9 resolveAgyFilePath 测试
+  const fakeHome = path.join(os.tmpdir(), 'dshadb-test-paths-' + Date.now())
+  mkdirSync(fakeHome, { recursive: true })
+  try {
+    // 既无新版也无旧版时，默认返回新版 agy/ 规范路径
+    const defaultPath = resolveAgyFilePath('agy-accounts.json', { dshHome: fakeHome })
+    a('默认解析新版 agy/ 路径', defaultPath === path.join(fakeHome, 'agy', 'agy-accounts.json'))
+
+    // 只有旧版文件时，降级返回旧版路径
+    writeFileSync(path.join(fakeHome, 'agy-accounts.json'), '{}')
+    const legacyPath = resolveAgyFilePath('agy-accounts.json', { dshHome: fakeHome })
+    a('降级解析旧版根目录路径', legacyPath === path.join(fakeHome, 'agy-accounts.json'))
+
+    // 新版文件存在时，优先返回新版路径
+    mkdirSync(path.join(fakeHome, 'agy'), { recursive: true })
+    writeFileSync(path.join(fakeHome, 'agy', 'agy-accounts.json'), '{}')
+    const newPath = resolveAgyFilePath('agy-accounts.json', { dshHome: fakeHome })
+    a('新版 agy/ 存在时优先返回新版路径', newPath === path.join(fakeHome, 'agy', 'agy-accounts.json'))
+
+    // 显式指定 agyAccountsFile 时优先
+    const customPath = resolveAgyFilePath('agy-accounts.json', { dshHome: fakeHome, agyAccountsFile: '/custom/path.json' })
+    a('显式指定 agyAccountsFile 时生效', customPath === '/custom/path.json')
+  } finally {
+    rmSync(fakeHome, { recursive: true, force: true })
+  }
 
   // 2.0 extractAgyAccountQuota 纯函数测试
   const qFromLimits = extractAgyAccountQuota({
@@ -194,6 +220,37 @@ const originalFetch = globalThis.fetch
     a('0.3.1 cachedLimits 百分比 total === 21', agy031Res.total === 21)
     a('0.3.1 cachedLimits 包含 031 邮箱与百分比', agy031Res.note.includes('21%') && agy031Res.note.includes('031user@example.com'))
     a('0.3.1 cachedLimits resetAt 存在', !!agy031Res.resetAt)
+
+    // 2.2c dsh-agy 0.4.x 新版目录结构 ~/.dsh/agy/agy-accounts.json 直读场景
+    rmSync(path.join(tmpHome, 'agy-accounts.json'), { force: true })
+    const agySubDir = path.join(tmpHome, 'agy')
+    mkdirSync(agySubDir, { recursive: true })
+    const mockAgy041Data = {
+      version: 4,
+      activeIndex: 0,
+      accounts: [
+        {
+          email: '041user@example.com',
+          enabled: true,
+          cachedLimits: {
+            groups: [
+              {
+                name: 'Gemini Models',
+                windows: [
+                  { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.88, resetTime: '2026-10-01T12:00:00Z' },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    }
+    writeFileSync(path.join(agySubDir, 'agy-accounts.json'), JSON.stringify(mockAgy041Data))
+    const agy041Res = await queryGeminiBalance(geminiPreset, '', { dshHome: tmpHome, agyApiUrl: 'http://127.0.0.1:9999/none', timeoutMs: 100 })
+    a('0.4.x agy/ 子目录直读成功 status === ok', agy041Res.status === 'ok')
+    a('0.4.x agy/ 子目录读取百分比正确 total === 88', agy041Res.total === 88)
+    a('0.4.x agy/ 子目录包含 041 邮箱与百分比', agy041Res.note.includes('88%') && agy041Res.note.includes('041user@example.com'))
+    rmSync(agySubDir, { recursive: true, force: true })
 
     // 2.3 账号禁用场景
     mockAgyData.accounts[0].enabled = false
