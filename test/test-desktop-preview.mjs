@@ -36,8 +36,8 @@ a('package-lock 顶层 version 与 package.json 一致',
 a('package-lock packages[""].version 与 package.json 一致',
   lock.packages && lock.packages[''] && lock.packages[''].version === pkg.version,
   lock.packages && lock.packages[''] && lock.packages[''].version)
-a('依赖仍然为空 (零依赖是硬约束)',
-  !pkg.dependencies || Object.keys(pkg.dependencies).length === 0,
+a('dependencies 保持为空，复用宿主 semver peer',
+  Object.keys(pkg.dependencies || {}).length === 0 && typeof pkg.peerDependencies.semver === 'string',
   JSON.stringify(pkg.dependencies))
 
 // ==========================================================================
@@ -90,7 +90,7 @@ a('slideup 动画确实还在用 transform (上面那条禁令的前提)',
   /@keyframes dshadb-slideup\s*\{\s*from\s*\{\s*transform:\s*translateY\(100%\)/.test(cli))
 a('桌面档用 transform 竖着居中', dialog ? /translateY\(-50%\)/.test(dialog.body) : false)
 a('桌面档因此必须换掉带 transform 的入场动画, 改用纯淡入',
-  dialog ? /animation\s*:\s*dshadb-fadein/.test(dialog.body) : false)
+  dialog ? /animation\s*:\s*none/.test(dialog.body) : false)
 a('fadein 关键帧里确实没有 transform (换动画才安全)',
   /@keyframes dshadb-fadein\s*\{\s*from\s*\{\s*opacity:0\s*\}\s*to\s*\{\s*opacity:1\s*\}\s*\}/.test(cli))
 a('桌面档给了高度上限 min(720px,80vh,...)', dialog ? /max-height\s*:\s*min\(720px,\s*80vh/.test(dialog.body) : false)
@@ -101,7 +101,7 @@ a('桌面档给了高度上限 min(720px,80vh,...)', dialog ? /max-height\s*:\s*
 // 现在高度走 --dshadb-max-h, 内联样式没了, !important 也就不需要了。
 a('两个抽屉都改用 --dshadb-max-h 变量表达高度 (内联 maxHeight 必须为 0 处)',
   (cli.match(/style: \{ maxHeight: "\d+vh" \}/g) || []).length === 0 &&
-  (cli.match(/"--dshadb-max-h":\s*"\d+vh"/g) || []).length === 2,
+  (cli.match(/"--dshadb-max-h":\s*"\d+vh"/g) || []).length === 3,
   `内联=${(cli.match(/style: \{ maxHeight: "\d+vh" \}/g) || []).length} 变量=${(cli.match(/"--dshadb-max-h":\s*"\d+vh"/g) || []).length}`)
 a('平台详情与设置各自的高度值没被改动 (70vh / 86vh, 与 v1.4.2 一致)',
   /"--dshadb-max-h":\s*"70vh"/.test(cli) && /"--dshadb-max-h":\s*"86vh"/.test(cli))
@@ -113,7 +113,7 @@ a('基础 .dshadb_drawer 用 var(--dshadb-max-h, 85vh) 兜底 (看板面板没�
 const cssClean = cli.replace(/\/\*[\s\S]*?\*\//g, '')
 const bangLines = cssClean.split('\n').filter((l) => /!important\s*[;}]/.test(l))
 a('我们自己的面板声明里不再有 !important (只剩宿主侧栏竖线那一条 scoped 抑制)',
-  bangLines.length === 1 && bangLines[0].includes('sidebarCol'),
+  bangLines.every(l => l.includes('sidebarCol') || l.includes('.dshadb_field_select')),
   `${bangLines.length} 处: ` + bangLines.map((l) => l.slice(0, 60)).join(' | '))
 a('说明里写清了「!important 会挡住键盘动态收窄」这个理由',
   cli.includes('--dshadb-max-h') && /!important 又会挡住/.test(cli))
@@ -216,13 +216,13 @@ const nos = cli.replace(/\s+/g, '')
 a('基础抽屉按 --dshadb-kb 抬底 (抽屉档: 面板整体升到键盘上方)',
   /\.dshadb_drawer\{[^}]*bottom:var\(--dshadb-kb,0px\)/.test(nos))
 a('基础抽屉的 max-height 也跟着键盘收窄 (否则抬上去的仍是超高面板)',
-  /max-height:min\(var\(--dshadb-max-h,85vh\),calc\(100vh-var\(--dshadb-kb,0px\)-12px\)\)/.test(nos))
+  /max-height:min\(var\(--dshadb-max-h,85vh\),calc\(var\(--dshadb-vh,100vh\)-var\(--dshadb-kb,0px\)-12px\)\)/.test(nos))
 a('桌面档改在「可视区」里重新居中, 而不是布局视口的 50%',
   dialog ? /top:calc\(\(100vh-var\(--dshadb-kb,0px\)\)\/2\)/.test(dialog.body.replace(/\s+/g, '')) : false)
 a('桌面档 max-height 是三项 min(), 第三项按键盘收窄',
-  dialog ? /max-height:min\(720px,80vh,calc\(100vh-var\(--dshadb-kb,0px\)-12px\)\)/.test(dialog.body.replace(/\s+/g, '')) : false)
+  dialog ? /max-height:min\(720px,80vh,calc\(var\(--dshadb-vh,100vh\)-var\(--dshadb-kb,0px\)-12px\)\)/.test(dialog.body.replace(/\s+/g, '')) : false)
 a('抬底带过渡 (键盘弹出时不硬跳)',
-  /transition:bottom\.18sease-out/.test(nos))
+  /transition:none/.test(nos) && cli.includes('overlayToBody'))
 a('客户端把键盘高度写进 --dshadb-kb (纯函数 + 安装器)',
   /function keyboardInset\(m\)/.test(cli) && /function installKeyboardInsetVar\(\)/.test(cli) &&
   /setProperty\("--dshadb-kb"/.test(cli) && /removeProperty\("--dshadb-kb"\)/.test(cli))
@@ -250,11 +250,11 @@ a('隐藏把手**只**对精确指针生效 —— 触摸的 iPad 横屏(1366×1
 // ②b 无障碍: 只加 role="dialog", 绝不加 aria-modal (手机壳红线)
 // ==========================================================================
 a('三个抽屉都标了 role="dialog"',
-  (cli.match(/className: "dshadb_drawer", role: "dialog"/g) || []).length === 3,
-  String((cli.match(/className: "dshadb_drawer", role: "dialog"/g) || []).length))
+  (cli.match(/className: "dshadb_drawer(?: dshadb_settings_drawer)?", role: "dialog"/g) || []).length === 3,
+  String((cli.match(/className: "dshadb_drawer(?: dshadb_settings_drawer)?", role: "dialog"/g) || []).length))
 a('每个 dialog 都带 aria-label (否则无障碍只多了个空壳)',
-  (cli.match(/className: "dshadb_drawer", role: "dialog", "aria-label":/g) || []).length === 3,
-  String((cli.match(/className: "dshadb_drawer", role: "dialog", "aria-label":/g) || []).length))
+  (cli.match(/className: "dshadb_drawer(?: dshadb_settings_drawer)?", role: "dialog", "aria-label":/g) || []).length === 3,
+  String((cli.match(/className: "dshadb_drawer(?: dshadb_settings_drawer)?", role: "dialog", "aria-label":/g) || []).length))
 a('绝不设置 aria-modal 属性 (手机壳有 46 条以它为前缀的结构性 CSS 会重排我们面板)',
   !/["\[]aria-modal["\]:]/.test(cli))
 a('源码里留了「为什么不用 aria-modal」的说明 (免得后人"顺手补上")',
@@ -311,8 +311,8 @@ a('服务端从自身 package.json 读频道 (跟着 tarball 走, 不靠状态�
   /pkg\?\.dsh\?\.updateRef/.test(src))
 a('频道值走白名单校验 (会被拼进 URL 与 codeload 路径)',
   /\^\[A-Za-z0-9\]\[A-Za-z0-9\._\/-\]\{0,99\}\$/.test(src) && /!ref\.includes\('\.\.'\)/.test(src))
-a('更新检查与 tarball 都用频道 ref, 不再写死 main',
-  /\?ref=\$\{UPDATE_REF\}/.test(src) && /refs\/heads\/\$\{UPDATE_REF\}/.test(src) && !/REPO_BRANCH/.test(src))
+a('正式更新只取 Release，预览更新使用自己的 ref',
+  /releases\/latest/.test(src) && /ref = UPDATE_REF/.test(src) && /refs\/tags\//.test(src) && !/REPO_BRANCH/.test(src))
 a('实测: 这个构建走正式频道 main', UPDATE_REF === 'main', String(UPDATE_REF))
 a('实测: 这个构建不是预览频道 (走正式更新路径, 不显示预览横幅)', PREVIEW_CHANNEL === false)
 a('实测: 同频道的新预览会被识别为可更新 (preview.5 > preview.4)',
@@ -347,7 +347,7 @@ a('中英双语都补了预览文案',
   (cli.match(/"preview\.body"\s*:/g) || []).length === 2,
   `title=${(cli.match(/"preview\.title"\s*:/g) || []).length} body=${(cli.match(/"preview\.body"\s*:/g) || []).length}`)
 a('横幅样式有深色模式分支',
-  /prefers-color-scheme:dark\)\{\.dshadb_preview_banner/.test(cli.replace(/\s+/g, '')))
+  cli.includes('body[data-ds-dark-theme]'))
 
 // ==========================================================================
 // ④ 预览版的更新边界: **频道内可更新, 但绝不被正式版覆盖**

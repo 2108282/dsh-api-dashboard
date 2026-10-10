@@ -70,7 +70,7 @@ export const name = 'dsh-api-dashboard'
 // ============================================================
 const REPO_OWNER = '133563825as-ai'
 const REPO_NAME = 'dsh-api-dashboard'
-// MANIFEST_API / TARBALL_URL 在下面 —— 它们依赖 UPDATE_REF(来自 SELF_ROOT 的 package.json)
+// 更新元信息来源由正式 Release / 显式预览频道决定，见 fetchRemoteUpdate。
 
 /** 插件运行实体的安装根目录 (src/index.js 上两级; ESM 默认按 realpath 加载) */
 /**
@@ -141,8 +141,6 @@ export const UPDATE_REF = (() => {
 })()
 /** 预览频道 = 版本号带预发布后缀 **且** 频道不是 main —— 只有这种情况才允许自更新 */
 export const PREVIEW_CHANNEL = IS_PREVIEW && UPDATE_REF !== 'main'
-const MANIFEST_API = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/package.json?ref=${UPDATE_REF}`
-const TARBALL_URL = `https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/refs/heads/${UPDATE_REF}`
 
 /**
  * semver 比较: a>b 返回 1, a<b 返回 -1, 相等返回 0。
@@ -195,17 +193,93 @@ export function semverCompare(a, b) {
   return 0
 }
 
-/** 经 api.github.com Contents API 读取**当前频道**(UPDATE_REF) 的 package.json version */
-async function fetchRemoteVersion(timeoutMs = 8000) {
-  const res = await fetch(MANIFEST_API, {
+// v1.7.0: 正式频道只跟已发布 Release；预览频道仍跟自己的 ref。
+const semverMod = await resolvePeer('semver').catch(() => null)
+// 旧宿主若缺 semver，只关闭更新能力，不能把整个看板启动拖垮。
+const semver = semverMod ? (semverMod.default ?? semverMod)
+  : { valid: () => null, validRange: () => null, satisfies: () => false, eq: () => false, prerelease: () => null }
+const { createHash } = await import('node:crypto')
+const API_ROOT = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}`
+const updateError = (code, message = code) => Object.assign(new Error(message), { code })
+const plainText = (value, max) => typeof value === 'string' ? value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '').slice(0, max) : ''
+const manifestDigest = (manifest) => {
+  const stable = (v) => Array.isArray(v) ? v.map(stable) : v && typeof v === 'object'
+    ? Object.fromEntries(Object.keys(v).sort().map(k => [k, stable(v[k])])) : v
+  return createHash('sha256').update(JSON.stringify(stable(manifest))).digest('hex')
+}
+
+/** 只读宿主版本，拿不到不猜：未知状态禁止自更新。 */
+async function runtimeDshVersion() {
+  try {
+    const host = await resolvePeer('@deepseek-ai/dsh-app-boot')
+    const version = host.getDshRuntimeVersion?.()
+    if (semver.valid(version)) return version
+  } catch { /* 旧宿主没有这个导出，使用其已安装 manifest */ }
+  for (const spec of ['@deepseek-ai/dsh-client-connection/package.json', '@deepseek-ai/dsh/package.json']) {
+    try {
+      const pkg = await resolvePeer(spec)
+      const version = (pkg.default ?? pkg).version
+      if (semver.valid(version)) return version
+    } catch { /* 下一个 */ }
+  }
+  return null
+}
+
+/** 与宿主准入一致：所有 DSH peers 均须满足，含 prerelease；没有声明不能冒充兼容。 */
+export function evaluateUpdateCompatibility(manifest, runtimeVersion) {
+  const requirements = []
+  let malformed = false
+  const add = (name, range) => {
+    if (typeof range !== 'string' || !semver.validRange(range)) malformed = true
+    requirements.push({ name, range: typeof range === 'string' ? range.slice(0, 300) : '' })
+  }
+  const peers = manifest?.peerDependencies
+  if (peers !== undefined && (!peers || typeof peers !== 'object' || Array.isArray(peers))) malformed = true
+  for (const [name, range] of Object.entries(peers && typeof peers === 'object' ? peers : {})) {
+    if (name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')) add(name, range)
+  }
+  if (manifest?.engines?.dsh !== undefined) add('engines.dsh', manifest.engines.dsh)
+  const targets = Array.isArray(manifest?.dsh?.update?.targets)
+    ? manifest.dsh.update.targets.filter(x => typeof x === 'string').slice(0, 6).map(x => plainText(x, 160)) : []
+  if (!semver.valid(runtimeVersion) || requirements.length === 0 || malformed) {
+    return { status: 'unknown', runtimeVersion: semver.valid(runtimeVersion) ? runtimeVersion : null, requirements, targets,
+      reason: malformed ? 'invalid-requirements' : requirements.length === 0 ? 'missing-requirements' : 'unknown-runtime' }
+  }
+  const mismatches = requirements.filter(r => !semver.satisfies(runtimeVersion, r.range, { includePrerelease: true }))
+  return { status: mismatches.length ? 'incompatible' : 'compatible', runtimeVersion, requirements, targets,
+    reason: mismatches.length ? 'runtime-mismatch' : null, mismatches }
+}
+
+async function githubJson(url, timeoutMs) {
+  const res = await fetch(url, {
     headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'dsh-api-dashboard-updater' },
     signal: AbortSignal.timeout(timeoutMs),
   })
   if (!res.ok) throw new Error(`GitHub API ${res.status}`)
-  const meta = await res.json()
-  const content = Buffer.from(meta.content ?? '', 'base64').toString('utf8')
-  const parsed = JSON.parse(content)
-  return typeof parsed.version === 'string' ? parsed.version : null
+  return res.json()
+}
+
+async function fetchRemoteUpdate(timeoutMs = 8000) {
+  let ref = UPDATE_REF, release = null
+  if (!PREVIEW_CHANNEL) {
+    release = await githubJson(API_ROOT + '/releases/latest', timeoutMs)
+    if (release.draft || release.prerelease || typeof release.tag_name !== 'string'
+        || !semver.valid(release.tag_name) || semver.prerelease(release.tag_name)) throw updateError('invalid-release')
+    ref = release.tag_name
+  }
+  const meta = await githubJson(API_ROOT + '/contents/package.json?ref=' + encodeURIComponent(ref), timeoutMs)
+  const manifest = JSON.parse(Buffer.from(meta.content ?? '', 'base64').toString('utf8'))
+  if (manifest.name !== name || !semver.valid(manifest.version)) throw updateError('invalid-manifest')
+  if (release && !semver.eq(release.tag_name, manifest.version)) throw updateError('release-version-mismatch')
+  const compatibility = evaluateUpdateCompatibility(manifest, await runtimeDshVersion())
+  return {
+    manifest, ref, compatibility,
+    summary: plainText(release?.body || manifest?.dsh?.update?.summary || manifest.description, 2400),
+    publishedAt: plainText(release?.published_at, 40),
+    releaseUrl: release ? `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/tag/${encodeURIComponent(ref)}` : null,
+    tarballUrl: `https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/${PREVIEW_CHANNEL ? 'refs/heads/' : 'refs/tags/'}${encodeURIComponent(ref)}`,
+    confirmationToken: manifestDigest({ manifest, ref, runtimeVersion: compatibility.runtimeVersion }),
+  }
 }
 
 /**
@@ -218,10 +292,23 @@ async function fetchRemoteVersion(timeoutMs = 8000) {
  * @param {string} [opts.localTarball] 测试注入口: 使用本地 tarball 代替 codeload 下载
  * @returns {{installed:string, targets:string[], backup:string}}
  */
-export async function applyUpdate({ targets = null, timeoutMs = 30000, remoteVersion = null, localTarball = null } = {}) {
+let updateInstalling = false
+export async function applyUpdate(options = {}) {
+  if (updateInstalling) throw updateError('update-busy')
+  updateInstalling = true
+  try { return await applyUpdateInternal(options) } finally { updateInstalling = false }
+}
+
+async function applyUpdateInternal({ targets = null, timeoutMs = 30000, remoteVersion = null, localTarball = null, expectedVersion = null, confirmationToken = null } = {}) {
   const currentVersion = readVersionAt(SELF_ROOT)
-  const wantVersion = remoteVersion !== null ? remoteVersion : await fetchRemoteVersion(timeoutMs).catch(() => null)
-  if (!wantVersion) throw new Error('remote version unavailable')
+  // 本地归档注入仅给测试；HTTP 路由不能接受路径或任意下载地址。
+  const remote = localTarball && remoteVersion ? null : await fetchRemoteUpdate(timeoutMs)
+  const wantVersion = remote?.manifest.version ?? remoteVersion
+  if (!wantVersion || !semver.valid(wantVersion)) throw new Error('remote version unavailable')
+  if (remote) {
+    if (expectedVersion !== wantVersion || confirmationToken !== remote.confirmationToken) throw updateError('update-changed')
+    if (remote.compatibility.status !== 'compatible') throw updateError('update-' + remote.compatibility.status)
+  }
   if (currentVersion && semverCompare(wantVersion, currentVersion) <= 0) {
     throw new Error(`already up to date (${currentVersion})`)
   }
@@ -270,7 +357,7 @@ export async function applyUpdate({ targets = null, timeoutMs = 30000, remoteVer
     if (localTarball) {
       cpSync(localTarball, tgzPath)
     } else {
-      const res = await fetch(TARBALL_URL, { signal: AbortSignal.timeout(timeoutMs) })
+      const res = await fetch(remote.tarballUrl, { signal: AbortSignal.timeout(timeoutMs) })
       if (!res.ok) throw new Error(`download ${res.status}`)
       writeFileSync(tgzPath, Buffer.from(await res.arrayBuffer()))
     }
@@ -279,9 +366,27 @@ export async function applyUpdate({ targets = null, timeoutMs = 30000, remoteVer
     execFileSync('tar', ['xzf', tgzPath, '-C', extractDir, '--strip-components=1'], { timeout: 20000 })
     // 3) 校验: 版本号匹配预期 + 关键文件齐全 + 包名一致 (装坏了宁可拒绝, 保住回滚机会)
     if (readVersionAt(extractDir) !== wantVersion) throw new Error('extracted version mismatch')
-    let extractedName = null
-    try { extractedName = JSON.parse(readFileSync(join(extractDir, 'package.json'), 'utf8')).name } catch { /* 忽略 */ }
-    if (extractedName !== 'dsh-api-dashboard') throw new Error('extracted package name mismatch')
+    const extractedManifest = JSON.parse(readFileSync(join(extractDir, 'package.json'), 'utf8'))
+    if (extractedManifest.name !== 'dsh-api-dashboard') throw new Error('extracted package name mismatch')
+    const extractedCompatibility = evaluateUpdateCompatibility(extractedManifest, await runtimeDshVersion())
+    if (extractedCompatibility.status !== 'compatible') throw updateError('update-' + extractedCompatibility.status)
+    if (remote && manifestDigest(extractedManifest) !== manifestDigest(remote.manifest)) throw updateError('update-changed')
+    // 原地更新不会安装新增依赖：必须确认现有依赖能满足目标声明。
+    for (const [dependency, range] of Object.entries(extractedManifest.dependencies ?? {})) {
+      let installedVersion = null
+      try {
+        const dependencyPkg = await resolvePeer(dependency + '/package.json')
+        installedVersion = (dependencyPkg.default ?? dependencyPkg).version
+      } catch { /* 未安装或无法核验 → 交给宿主管理器安装 */ }
+      if (!semver.valid(installedVersion) || !semver.validRange(range)
+          || !semver.satisfies(installedVersion, range, { includePrerelease: true })) throw updateError('update-dependencies')
+    }
+    for (const rel of ['src/index.js', 'client/client.js']) {
+      execFileSync(process.execPath, ['--check', join(extractDir, rel)], { timeout: 10000, stdio: 'ignore' })
+    }
+    // 提交前重新检查；这是尽力而为的宿主锁探测，不宣称持锁互斥。
+    assertHostLockFree()
+    if (readVersionAt(SELF_ROOT) !== currentVersion) throw updateError('update-changed')
     for (const rel of ['src/index.js', 'client/client.js', 'cordis.patch.yml']) {
       if (!existsSync(join(extractDir, rel))) throw new Error(`missing file after extract: ${rel}`)
     }
@@ -377,14 +482,18 @@ function readdirSafe(dir) {
 let updateCache = { checkedAt: 0, result: null }
 const UPDATE_TTL_MS = 5 * 60 * 1000
 
-async function getUpdateStatus(force = false) {
+export async function getUpdateStatus(force = false) {
   const fresh = Date.now() - updateCache.checkedAt < UPDATE_TTL_MS
   if (!force && fresh && updateCache.result) return updateCache.result
   const current = readVersionAt(SELF_ROOT)
   let result
   try {
-    const remote = await fetchRemoteVersion()
-    result = { ok: true, current, remote, hasUpdate: current !== null && semverCompare(remote, current) > 0, checkedAt: Date.now() }
+    const details = await fetchRemoteUpdate()
+    const remote = details.manifest.version
+    result = { ok: true, current, remote, hasUpdate: current !== null && semverCompare(remote, current) > 0, checkedAt: Date.now(),
+      summary: details.summary, publishedAt: details.publishedAt, releaseUrl: details.releaseUrl,
+      compatibility: details.compatibility, confirmationToken: details.confirmationToken,
+      canInstall: details.compatibility.status === 'compatible', channel: PREVIEW_CHANNEL ? UPDATE_REF : 'stable' }
   } catch {
     // 错误信息固定文案, 不外泄内部异常细节 (沿用 v0.5.16 安全审计口径)
     result = { ok: false, current, remote: null, hasUpdate: false, checkedAt: Date.now() }
@@ -981,6 +1090,23 @@ const readSettingsDerived = () => {
   return settingsDerivedCache
 }
 
+/** 官方 DeepSeek 插件的凭据引用；不从 pi-ai 中转 provider 猜 Key。 */
+export function parseOfficialDeepSeekRef(text) {
+  const entries = String(text || '').split(/(?=^\s*- id:)/m)
+  for (const entry of entries) {
+    if (!/^\s*- id:\s*["']?llm-deepseek["']?\s*$/m.test(entry)
+        || !/^\s*name:\s*["']?@deepseek-ai\/dsh-llm-deepseek-api-key["']?\s*$/m.test(entry)) continue
+    const ref = entry.match(/^\s*apiKeyEnv:\s*["']?([A-Za-z_][A-Za-z0-9_]*)["']?\s*$/m)?.[1]
+    const base = entry.match(/^\s*baseURL:\s*["']?([^\s"']+)/m)?.[1]
+    if (ref && (!base || ['api.deepseek.com', 'api.deepseek.cn'].includes(hostOfUrl(base)))) return ref
+  }
+  return ''
+}
+const officialDeepSeekRef = () => {
+  const profile = process.env.DSHA_STARTUP_PROFILE || 'web'
+  try { return parseOfficialDeepSeekRef(readFileSync(join(DSH_HOME_DIR, 'profiles', profile, 'cordis.patch.yml'), 'utf8')) } catch { return '' }
+}
+
 /** 读 settings.yaml 算第 2 层判定 */
 const readProviderKinds = () => readSettingsDerived().kinds
 
@@ -1142,6 +1268,19 @@ export const MODEL_PRICES = {
   //    注: 该页 HTML 里的价格藏在 <script> 的双层转义 JSON 中, 不在 <table> 里; 本容器内 chromium 无网络渲染不了,
   //    但直接取页面 + 还原转义即可拿到官方原文 (无需代理)。同一页还列出 GPT-Image-2.5 / GPT-Live-1 / GPT-Realtime-2.1 mini。
   //    ⚠️ 官方现列表价 $5/$30, 已无促销标记 —— 旧值 4/20 记的是"临时促销价", 按 AGENTS.md 红线(促销必须有官方原文兜底)改用官方现价。
+  // 2026-10-10 新模型：models.dev 的官方提供商条目与 LiteLLM 直连条目交叉核对。
+  // ⚠️ 参考价，未核实官方原文（OpenAI 页面403，Anthropic 文档不可达）。单位 USD / 1M tokens。
+  // 来源 https://github.com/sst/models.dev/tree/dev/providers/openai/models
+  //      https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json
+  // 这里只采用 Standard 基础档；GPT-6/6.1 >272K、Haiku5.5 >100K 及 priority/ultrafast/Batch 不在本表覆盖。
+  // 使用长上下文/快档应手动覆盖价格，不能把这些参考基础价当平台实际扣费。
+  'gpt-6.1-sol':          { cacheHit: 0.10, cacheMiss: 2.00, cacheWrite: 2.50,  output: 10.00 },
+  'gpt-6-sol':            { cacheHit: 0.20, cacheMiss: 2.00, cacheWrite: 2.50,  output: 10.00 },
+  'gpt-6-luna':           { cacheHit: 0.01, cacheMiss: 0.10, cacheWrite: 0.125, output: 0.50 },
+  // 来源 https://github.com/sst/models.dev/tree/dev/providers/anthropic/models ，同上 LiteLLM 交叉核对。
+  'claude-opus-5-5':      { cacheHit: 0.20, cacheMiss: 4.00, cacheWrite: 5.00,  output: 20.00 },
+  'claude-sonnet-5-5':    { cacheHit: 0.10, cacheMiss: 2.00, cacheWrite: 2.50,  output: 10.00 },
+  'claude-haiku-5-5':     { cacheHit: 0.01, cacheMiss: 0.10, cacheWrite: 0.125, output: 0.50 },
   'gpt-6-astra':          { cacheHit: 1.0,   cacheMiss: 10.0,  output: 50.0 },  // 官方 Input $10 / Cached input $1 / Output $50 (官方页当前最强档)
   'gpt-5.6-sol':          { cacheHit: 0.5,   cacheMiss: 5.0,   output: 30.0 },  // 官方 $5 / $0.5 / $30
   'gpt-5.6-terra':        { cacheHit: 0.2,   cacheMiss: 2.0,   output: 12.0 },  // 2026-07-30 降价
@@ -1473,15 +1612,9 @@ export const resolveModelPrice = (configOrGetter, model, timestamp = Date.now(),
   return convertPrice(config?.defaultPrices ?? { cacheHit: 0.1, cacheMiss: 1, output: 2 }, 'USD', display)
 }
 
-/** 通用 fetch 请求, 带超时。 */
+/** 超时覆盖响应头和后续 body 读取，避免慢响应体卡死整轮刷新。 */
 async function fetchWithTimeout(url, headers, timeoutMs, method = 'GET') {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    return await fetch(url, { method, headers, signal: controller.signal })
-  } finally {
-    clearTimeout(timer)
-  }
+  return fetch(url, { method, headers, signal: AbortSignal.timeout(timeoutMs) })
 }
 
 /** 读取请求体并限制大小 (默认 256KB) —— 防持有 token 者灌大包打爆内存。超限抛错。 */
@@ -1524,7 +1657,7 @@ const PLATFORM_PRESETS = [
   //    未核实 = 无官方直链, 但实测该路径被系统接受(302 到登录页并把路径留在 redirect 里)
   //    仅首页 = 拿不到充值路径, 只填一级域名/控制台首页; 再差就留空(宁缺毋滥, 别联想路径)
   { id: 'deepseek', label: 'DeepSeek', icon: 'deepseek', color: '#4D6BFE', category: '国内',
-    baseUrl: 'https://api.deepseek.com', queryType: 'deepseek', envKeys: ['DEEPSEEK_API_KEY'],
+    baseUrl: 'https://api.deepseek.com', queryType: 'deepseek', envKeys: ['DEEPSEEK_API_KEY', 'DSHA_DEEPSEEK_OFFICIAL_API_KEY'],
     consoleUrl: 'https://platform.deepseek.com/top_up' },                    // 已核实
   { id: 'zhipu', label: '智谱 GLM', icon: 'zhipu', color: '#3859FF', category: '国内',
     // v0.5.5: 实测余额监控接口在 open.bigmodel.cn (api.z.ai 同路径 401); 补 ZAI_CODING_CN 等 key 别名
@@ -1641,6 +1774,7 @@ export const Config = Schema.object({
   whaleEnabled: Schema.boolean().default(false),
   /** 显示无余额模型品牌 (OpenAI/Claude/Gemini/Qwen/MiMo), 默认关闭 */
   showNoBalanceBrands: Schema.boolean().default(false),
+  showSubagentCapsules: Schema.boolean().default(true),
   /** 官方直连 provider 名单 (第 1 层判定, 最高优先级)。
    *  写在这里的 provider 名一律按「官方直连」处理, 状态条显示官方余额;
    *  没写的按 baseURL 域名 / `-official` 后缀自动判定, 都不命中则按中转站显示「—」。 */
@@ -1679,7 +1813,7 @@ let lastAlertState = {}
 // → 两个分支都落空, 告警被 try/catch 静默吞掉: 作者以为会通知, 用户从未收到。
 //
 // 现改走 DSHA App 桥 —— 与 dsh-task-notifier 同一条链路, 是当前真正能弹通知的通道:
-//   GET http://127.0.0.1:3090/app/notify?title=&text=&token=
+//   GET http://127.0.0.1:3090/app/notify?title=&text= (凭据放 X-Token 请求头)
 // token 读 $DSH_HOME/.bridge_token。拿不到通道时不再只"静默": alertStatus.channel 记 'none',
 // 由 /api-dashboard/alerts 暴露给设置面板做可见降级 (issue #2 点名要求这一点)。
 const ALERT_BRIDGE_URL = 'http://127.0.0.1:3090/app/notify'
@@ -1762,9 +1896,10 @@ async function bridgeCall(base, params, timeoutMs) {
   try {
     const token = await readBridgeToken()
     if (!token) return { kind: 'failed', status: 0, body: 'no-token' }
-    const qs = Object.entries({ ...params, token })
-      .map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&')
-    const resp = await fetch(base + '?' + qs, { signal: AbortSignal.timeout(timeoutMs) })
+    const qs = new URLSearchParams(params).toString()
+    const resp = await fetch(base + (qs ? '?' + qs : ''), {
+      headers: { 'X-Token': token }, signal: AbortSignal.timeout(timeoutMs),
+    })
     const body = await resp.text()
     return { kind: classifyBridgeReply(resp.status, body), status: resp.status, body }
   } catch (err) {
@@ -1793,8 +1928,8 @@ async function probeAlertChannel() {
   try {
     const token = await readBridgeToken()
     if (!token) { alertStatus.channel = 'none'; alertStatus.checkedAt = Date.now(); return alertStatus.channel }
-    const resp = await fetch(ALERT_BRIDGE_PROBE + '?token=' + encodeURIComponent(token),
-      { signal: AbortSignal.timeout(2000) })
+    const resp = await fetch(ALERT_BRIDGE_PROBE,
+      { headers: { 'X-Token': token }, signal: AbortSignal.timeout(2000) })
     await resp.text()
     alertStatus.channel = resp.ok ? 'app-bridge' : 'none'
   } catch {
@@ -2362,7 +2497,8 @@ const loadCacheEntry = (sessionId) => {
   } catch { entry = null }
   // 只缓存成功结果, 避免一次读失败被 TTL 钉住 3 秒
   if (entry !== null) sessionCacheFiles.set(id, entry)
-  if (sessionCacheFiles.size > 256) sessionCacheFiles.clear()
+  // 不再整表清空：有数百历史会话时整清会反复击穿 TTL。
+  if (sessionCacheFiles.size > 1024) sessionCacheFiles.delete(sessionCacheFiles.keys().next().value)
   return entry
 }
 
@@ -2406,7 +2542,10 @@ const listCacheSessionIds = () => {
  */
 /** 把某个会话 state 里"今天"那一桶折算出来, 累进 acc(金额按币种 + token 总量 + 逐模型)。 */
 const add2 = (acc, priceDay, state, day) => {
-  const dayMap = state?.byDay?.[day]
+  // fork 的继承历史已经由父会话计过，跨会话只合并自身日桶。
+  const dayState = state?.own?.byDay !== undefined ? state.own
+    : state?.inheritedEventCount > 0 ? null : state
+  const dayMap = dayState?.byDay?.[day]
   if (!dayMap) return
   const s = priceDay(dayMap)
   for (const cur of Object.keys(s.byCurrency)) {
@@ -2466,7 +2605,11 @@ export const collectTodayCost = (services, priceDay, selfState) => {
   } catch { /* 宿主没给 list() → 只靠缓存目录 */ }
   for (const id of listCacheSessionIds()) {
     if (seen.has(id)) continue
-    add(readSessionCacheRecord(id)?.queryBalanceCost?.val)
+    const entry = loadCacheEntry(id)
+    const val = entry?.rows?.queryBalanceCost?.val
+    // 老 fork 缓存没有自身日桶，不能把继承段冒充新用量。
+    const inherited = val?.inheritedEventCount ?? entry?.identity?.inheritedEventCount
+    add(val && inherited !== undefined ? { ...val, inheritedEventCount: inherited } : val)
   }
   return { day, byCurrency: acc.byCurrency, tokens: acc.tokens, byModel: acc.byModel }
 }
@@ -2486,7 +2629,9 @@ const cachedCostState = (sessionId) => {
   const row = entry?.rows?.queryBalanceCost
   const val = row?.val
   if (val === null || typeof val !== 'object' || !Array.isArray(val.modelOrder) || val.byModel === null || typeof val.byModel !== 'object') return null
-  if (row.ver === 3 && val.own !== undefined) return val
+  // 只接受已知状态版本，保留 v4 峰谷桶 / v5 日桶；未来版本不可盲读。
+  if (!Number.isInteger(row.ver) || row.ver > 6 || row.ver < 1) return null
+  if ([3, 4, 5, 6].includes(row.ver) && val.own !== null && typeof val.own === 'object') return val
   const inherited = entry?.identity?.inheritedEventCount
   if (inherited === 0) {
     return {
@@ -2494,6 +2639,7 @@ const cachedCostState = (sessionId) => {
       own: {
         currentModel: val.currentModel ?? null, currentProvider: val.currentProvider ?? null,
         last: val.last ?? null, byModel: val.byModel, modelOrder: val.modelOrder,
+        phaseBuckets: val.phaseBuckets, byDay: val.byDay,
       },
     }
   }
@@ -2922,7 +3068,7 @@ export function makeCostProjection(configOrGetter, services) {
       inheritedEventCount: z.number().int().nonnegative(),
       ownBoundaryKnown: z.boolean(),
       ownChildIds: z.array(z.string()),
-      own: z.object({ currentModel: z.string().nullable(), currentProvider: z.string().nullable(), last: z.any().nullable(), byModel: z.record(z.string(), z.object({ uncachedInputTokens: z.number().nonnegative(), cacheReadTokens: z.number().nonnegative(), cacheWriteTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative() })), phaseBuckets: z.record(z.string(), z.any()).optional(), modelOrder: z.array(z.string()) }),
+      own: z.object({ currentModel: z.string().nullable(), currentProvider: z.string().nullable(), last: z.any().nullable(), byModel: z.record(z.string(), z.object({ uncachedInputTokens: z.number().nonnegative(), cacheReadTokens: z.number().nonnegative(), cacheWriteTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative() })), phaseBuckets: z.record(z.string(), z.any()).optional(), byDay: z.record(z.string(), z.record(z.string(), z.any())).optional(), modelOrder: z.array(z.string()) }),
     }),
     init: (header, inheritedEventCount) => ({
       currentModel: null, currentProvider: null, last: null, byModel: {}, phaseBuckets: {}, byDay: {}, modelOrder: [],
@@ -2930,15 +3076,19 @@ export function makeCostProjection(configOrGetter, services) {
       inheritedEventCount: Number.isSafeInteger(inheritedEventCount) && inheritedEventCount >= 0 ? inheritedEventCount : 0,
       ownBoundaryKnown: (Number.isSafeInteger(inheritedEventCount) && inheritedEventCount >= 0) || !header?.isSeeded,
       ownChildIds: [],
-      own: { currentModel: null, currentProvider: null, last: null, byModel: {}, phaseBuckets: {}, modelOrder: [] },
+      own: { currentModel: null, currentProvider: null, last: null, byModel: {}, phaseBuckets: {}, byDay: {}, modelOrder: [] },
     }),
     apply: (state, event) => {
       const full = foldUsage(state, event)
       const isOwn = state.ownBoundaryKnown && (state.inheritedEventCount === 0 || (Number.isSafeInteger(event.seq) && event.seq >= state.inheritedEventCount))
       // Inherited model context is useful; inherited usage and retry slots are not.
-      const own = isOwn ? foldUsage(state.own, event) : { ...state.own, currentModel: full.currentModel, currentProvider: full.currentProvider }
+      const own = isOwn ? foldUsage(state.own, event)
+        : full.currentModel === state.own.currentModel && full.currentProvider === state.own.currentProvider
+          ? state.own : { ...state.own, currentModel: full.currentModel, currentProvider: full.currentProvider }
       const childId = isOwn && event.type === 'subagent/catalog' ? event.data?.childId : null
       const ownChildIds = typeof childId === 'string' && !state.ownChildIds.includes(childId) ? [...state.ownChildIds, childId] : state.ownChildIds
+      // 无关事件保留引用，宿主不用为每次工具事件同步扫描/序列化整个看板。
+      if (full === state && own === state.own && ownChildIds === state.ownChildIds) return state
       return { ...full, own, ownChildIds }
     },
     wire: {
@@ -3029,7 +3179,7 @@ export function makeCostProjection(configOrGetter, services) {
       }
       },
     },
-    stateVersion: 5,
+    stateVersion: 6,
   }
 }
 
@@ -3072,6 +3222,7 @@ export function apply(ctx, config) {
     warnThreshold: persisted.warnThreshold ?? config.warnThreshold ?? 10,
     whaleEnabled: persisted.whaleEnabled ?? config.whaleEnabled ?? false,
     showNoBalanceBrands: persisted.showNoBalanceBrands ?? config.showNoBalanceBrands ?? false,
+    showSubagentCapsules: typeof persisted.showSubagentCapsules === 'boolean' ? persisted.showSubagentCapsules : config.showSubagentCapsules ?? true,
     officialProviders: normalizeOfficialProviders(persisted.officialProviders ?? config.officialProviders ?? []),
     // v1.4.0「真自动」: 被用户关掉的 DSH provider (默认空 = 全部启用)。复用同一个名单规范化器。
     dshProviderOptOut: normalizeOfficialProviders(persisted.dshProviderOptOut ?? config.dshProviderOptOut ?? []),
@@ -3132,7 +3283,9 @@ export function apply(ctx, config) {
 
   /** 解析预设平台的 API key (从环境变量、credentials 系统或直接读凭据文件) */
   const resolvePresetKey = async (platform) => {
-    const refs = platform.envKeys || []
+    const declaredRef = platform.id === 'deepseek' ? officialDeepSeekRef() : ''
+    if (declaredRef) { const key = await resolveApiKeyRef(declaredRef); if (key) return key }
+    const refs = [...new Set([declaredRef, ...(platform.envKeys || [])].filter(Boolean))]
     // 1) 环境变量
     for (const name of refs) {
       if (process.env[name]) return process.env[name]
@@ -3198,6 +3351,7 @@ export function apply(ctx, config) {
   let inflight = null
 
   const refreshAll = async () => {
+    if (!loopActive) return
     if (inflight !== null) return inflight
     inflight = (async () => {
       const presetList = PLATFORM_PRESETS.filter(p => runtimeConfig.presets.includes(p.id))
@@ -3218,6 +3372,7 @@ export function apply(ctx, config) {
         ...modelList.map(async (m) => queryCustomModel(m, runtimeConfig)),
       ]
       const results = await Promise.allSettled(tasks)
+      if (!loopActive) return // 卸载后的在飞结果不能再写告警/缓存。
       // v0.5.7: last-known-good 兜底 — 平台瞬时网络故障(超时/DNS抖动)不冲掉上次成功数据,
       // 避免看板红闪「异常」; 标注 stale 提示用户这是暂存值
       const prevBalances = Array.isArray(cache.balances) ? cache.balances : []
@@ -3256,6 +3411,7 @@ export function apply(ctx, config) {
           alertRepeatHours: runtimeConfig.alertRepeatHours,
           whaleEnabled: !!runtimeConfig.whaleEnabled,
           showNoBalanceBrands: !!runtimeConfig.showNoBalanceBrands,
+            showSubagentCapsules: !!runtimeConfig.showSubagentCapsules,
           // provider 官方/中转判定素材下发给客户端 (第 1 层: 用户名单; 第 2 层: baseURL 域名判定)
           officialProviders: runtimeConfig.officialProviders,
           providerKinds: readProviderKinds(),
@@ -3276,23 +3432,36 @@ export function apply(ctx, config) {
     return inflight
   }
 
-  let loopTimer = null
+  let loopTimer = null, loopGeneration = 0, loopActive = false
   const resetLoop = () => {
+    const generation = ++loopGeneration
     if (loopTimer !== null) { clearTimeout(loopTimer); loopTimer = null }
-    const run = () => { refreshAll().catch(() => {}).finally(() => { loopTimer = setTimeout(run, runtimeConfig.refreshIntervalMs) }) }
+    if (!loopActive) return
+    const run = () => {
+      loopTimer = null
+      if (!loopActive || generation !== loopGeneration) return
+      refreshAll().catch(() => {}).finally(() => {
+        if (loopActive && generation === loopGeneration) loopTimer = setTimeout(run, runtimeConfig.refreshIntervalMs)
+      })
+    }
     loopTimer = setTimeout(run, 0)
   }
 
   ctx.effect(() => {
+    loopActive = true
     resetLoop()
-    return () => { if (loopTimer !== null) clearTimeout(loopTimer) }
+    return () => {
+      loopActive = false; ++loopGeneration
+      if (loopTimer !== null) { clearTimeout(loopTimer); loopTimer = null }
+    }
   }, 'dsh-api-dashboard: refresh loop')
 
   // HTTP 路由
   ctx.inject(['webServer'], (webCtx) => {
     const sendJson = (res, code, data) => {
       const body = JSON.stringify(data)
-      res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Length': Buffer.byteLength(body) })
+      // 控制JSON保持原始字节发送，宿主压缩钩子尊重no-transform。
+      res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store, no-transform', 'Content-Length': Buffer.byteLength(body) })
       res.end(body)
     }
 
@@ -3324,13 +3493,17 @@ export function apply(ctx, config) {
      *    必须用嵌套 inject 拿服务实例。
      */
     let connectionSvc = null
-    ctx.inject(['connection'], (c) => { connectionSvc = c.connection })
+    ctx.inject(['connection'], (c) => {
+      connectionSvc = c.connection
+      return () => { connectionSvc = null }
+    })
     const allowRequest = (req, res) => {
       const conn = connectionSvc
-      // 老版本 dsh 没有 connection 服务时放行(那时本来也没有鉴权概念), 避免把插件打死
-      if (!conn || typeof conn.requestRejection !== 'function') return true
-      let rejection
-      try { rejection = conn.requestRejection(req) } catch { rejection = undefined }
+      // 依赖尚未就绪/已卸载/校验异常时拒绝，不能把加载竞态变成鉴权绕过。
+      let rejection = 503
+      if (conn && typeof conn.requestRejection === 'function') {
+        try { rejection = conn.requestRejection(req) } catch { rejection = 503 }
+      }
       if (rejection === undefined) return true
       res.writeHead(rejection, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
       res.end(rejection === 401 ? 'dsh web authentication required; reopen the URL printed by dsh web.\n' : 'forbidden\n')
@@ -3438,10 +3611,17 @@ export function apply(ctx, config) {
         if (!allowRequest(req, res)) return
         if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }); res.end(); return }
         try {
-          const result = await applyUpdate({})
+          let payload
+          try { payload = JSON.parse(await readBody(req)) } catch { return sendJson(res, 400, { ok: false, error: 'invalid-confirmation' }) }
+          if (typeof payload?.expectedVersion !== 'string' || !semver.valid(payload.expectedVersion)
+              || !/^[a-f0-9]{64}$/.test(payload?.confirmationToken ?? '')) return sendJson(res, 400, { ok: false, error: 'invalid-confirmation' })
+          const result = await applyUpdate({ expectedVersion: payload.expectedVersion, confirmationToken: payload.confirmationToken })
           updateCache = { checkedAt: Date.now(), result: { ok: true, current: result.installed, remote: result.installed, hasUpdate: false, checkedAt: Date.now() } }
           sendJson(res, 200, { ok: true, installed: result.installed, targets: result.targets, backup: result.backup, needRestart: true })
         } catch (err) {
+          if (['update-incompatible', 'update-unknown', 'update-changed', 'update-busy', 'update-dependencies'].includes(err?.code)) {
+            return sendJson(res, 409, { ok: false, error: err.code })
+          }
           const msg = /already up to date/.test(String(err?.message)) ? `already up to date`
             : /GitHub API|download|remote version/.test(String(err?.message)) ? 'network failed'
             : 'update failed'
@@ -3560,7 +3740,7 @@ export function apply(ctx, config) {
             const body = raw ? JSON.parse(raw) : {}
             const cur = runtimeConfig.whaleSettings
             const num = (v, lo, hi, dflt) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(Math.max(v, lo), hi) : dflt)
-            runtimeConfig.whaleSettings = {
+            const nextSettings = {
               scale: num(body.scale, 0.6, 2.5, cur.scale),
               soundOn: typeof body.soundOn === 'boolean' ? body.soundOn : cur.soundOn,
               soundSet: body.soundSet === 'fx1' ? 'fx1' : (body.soundSet === 'duck' ? 'duck' : cur.soundSet),
@@ -3574,20 +3754,10 @@ export function apply(ctx, config) {
               // v1.1.0: 只保留左右吸附 (上下不再缩回); '' = 停在屏幕中间不缩
               side: ['left', 'right', ''].includes(body.side) ? body.side : cur.side,
             }
-            savePersistedState({
-              refreshIntervalMs: runtimeConfig.refreshIntervalMs,
-              clientPollIntervalMs: runtimeConfig.clientPollIntervalMs,
-              timeoutMs: runtimeConfig.timeoutMs,
-              customRelays: runtimeConfig.customRelays,
-              customModels: runtimeConfig.customModels,
-              currency: runtimeConfig.currency,
-              overseasCurrency: runtimeConfig.overseasCurrency,
-              safeThreshold: runtimeConfig.safeThreshold,
-              warnThreshold: runtimeConfig.warnThreshold,
-              whaleEnabled: runtimeConfig.whaleEnabled,
-              showNoBalanceBrands: runtimeConfig.showNoBalanceBrands,
-              whaleSettings: runtimeConfig.whaleSettings,
-            })
+            if (!savePersistedState({ whaleSettings: nextSettings })) {
+              return sendJson(res, 500, { ok: false, error: 'settings-save-failed' })
+            }
+            runtimeConfig.whaleSettings = nextSettings
             sendJson(res, 200, { ok: true, settings: runtimeConfig.whaleSettings })
           } catch (err) {
             const code = err && err.statusCode === 413 ? 413 : 400
@@ -3622,6 +3792,7 @@ export function apply(ctx, config) {
             overseasCurrency: runtimeConfig.overseasCurrency,
             whaleEnabled: !!runtimeConfig.whaleEnabled,
             showNoBalanceBrands: !!runtimeConfig.showNoBalanceBrands,
+            showSubagentCapsules: !!runtimeConfig.showSubagentCapsules,
             officialProviders: runtimeConfig.officialProviders,
             // 只读: 供设置面板显示「自动判定结果」, 让用户知道哪些还需要手填
             providerKinds: readProviderKinds(),
@@ -3645,6 +3816,15 @@ export function apply(ctx, config) {
           try {
             let body = await readBody(req)
             body = body ? JSON.parse(body) : {}
+            // 纯开关保存不等待外部余额网络；先落盘成功再提交内存。
+            const toggleFields = ['showSubagentCapsules', 'whaleEnabled', 'showNoBalanceBrands']
+            const keys = Object.keys(body)
+            if (keys.length && keys.every(k => toggleFields.includes(k) && typeof body[k] === 'boolean')) {
+              if (!savePersistedState(body)) return sendJson(res, 500, { ok: false, error: 'settings-save-failed' })
+              Object.assign(runtimeConfig, body)
+              cache.config = { ...cache.config, ...body }
+              return sendJson(res, 200, { ok: true, ...body })
+            }
             // 数组规模上限: 状态文件与每次轮询都要带它们, 防垃圾数据无限膨胀
             const MAX_ITEMS = 64
             const cleanId = (v) => cleanStr(v, 64).replace(/[^a-zA-Z0-9_-]/g, '')
@@ -3694,6 +3874,7 @@ export function apply(ctx, config) {
             if (typeof body.whaleEnabled === 'boolean') runtimeConfig.whaleEnabled = body.whaleEnabled
             // 显示无余额模型品牌
             if (typeof body.showNoBalanceBrands === 'boolean') runtimeConfig.showNoBalanceBrands = body.showNoBalanceBrands
+            if (typeof body.showSubagentCapsules === 'boolean') runtimeConfig.showSubagentCapsules = body.showSubagentCapsules
             // 官方直连 provider 名单 (第 1 层判定); 接受数组或逗号/换行分隔的字符串
             if (Array.isArray(body.officialProviders) || typeof body.officialProviders === 'string') {
               runtimeConfig.officialProviders = normalizeOfficialProviders(body.officialProviders)
@@ -3717,6 +3898,7 @@ export function apply(ctx, config) {
               alertRepeatHours: runtimeConfig.alertRepeatHours,
               whaleEnabled: runtimeConfig.whaleEnabled,
               showNoBalanceBrands: runtimeConfig.showNoBalanceBrands,
+              showSubagentCapsules: runtimeConfig.showSubagentCapsules,
               officialProviders: runtimeConfig.officialProviders,
               dshProviderOptOut: runtimeConfig.dshProviderOptOut,
             })
@@ -3730,6 +3912,7 @@ export function apply(ctx, config) {
               overseasCurrency: runtimeConfig.overseasCurrency,
               whaleEnabled: !!runtimeConfig.whaleEnabled,
               showNoBalanceBrands: !!runtimeConfig.showNoBalanceBrands,
+            showSubagentCapsules: !!runtimeConfig.showSubagentCapsules,
               officialProviders: runtimeConfig.officialProviders,
               providerKinds: readProviderKinds(),
               dshProviders: readDshProviderStatus(),
@@ -3835,8 +4018,8 @@ export function apply(ctx, config) {
           const home = process.env.DSH_HOME || join(homedir(), '.dsh')
           const token = (await fsp.readFile(join(home, '.bridge_token'), 'utf-8')).trim()
           const resp = await fetch(
-            'http://127.0.0.1:3090/app/open?url=' + encodeURIComponent(url) + '&token=' + encodeURIComponent(token),
-            { signal: AbortSignal.timeout(3000) })
+            'http://127.0.0.1:3090/app/open?url=' + encodeURIComponent(url),
+            { headers: { 'X-Token': token }, signal: AbortSignal.timeout(3000) })
           await resp.text()
           if (resp.ok) return sendJson(res, 200, { ok: true, via: 'app-bridge', url, platform: preset.id })
         } catch { /* 没桥(桌面/浏览器) → 回退给客户端开 */ }

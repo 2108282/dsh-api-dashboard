@@ -7,6 +7,8 @@
 
 ## 一、这是什么
 
+> v1.7.0 维护补充：复用宿主 `semver`（optional peer）用于严格更新范围验证，不能以手写比较替代范围匹配；保持零 dependencies。投影 stateVersion=6 保存 own.byDay；冷读取接受已知 v3–v6，未来版本不盲读。旧 fork 缺自身日桶只可标不完整/跳过，不能累加 full 继承历史。发布前检查 Release body 与 manifest `dsh.update.targets`，不能宣称未验收版本已实测。
+
 `dsh-api-dashboard` 是 **DeepSeek Harness 专用** 的多平台 API 余额/用量看板插件。
 深度绑定 DSHA Web 框架：`conversation.composer.dock` slot、`sessionProjections`、`webServer` 路由、`credentials` 凭证。
 **仅能运行在 DeepSeek Harness（手机版 DSHA / 桌面版）里**，任何其他环境无法加载。
@@ -214,8 +216,8 @@ DSH 启动时会把 profile 的 `dsh.profile.bundles` **逐个 import**，只要
 
 ## 五、自动更新机制（v0.6.0+)
 
-- `GET /api-dashboard/update`：对比 GitHub main 的 package.json version，5 分钟缓存。
-- `POST /api-dashboard/update/install`：下载→校验→备份→原子替换→失败回滚，重启生效。
+- v1.7.0：`GET /api-dashboard/update` 正式频道只读已发布非预发行 Release 的 tag manifest，预览频道继续读自身 ref；返回摘要、适配对象、全部 DSH peer/engine 范围和兼容状态，5 分钟缓存。
+- `POST /api-dashboard/update/install` 必须提交 GET 返回的 `expectedVersion` 与 `confirmationToken`；服务端重新读取 manifest/runtime，拒绝不兼容、未知、目标变化和并发更新；解包后比对完整 manifest，再次兼容校验及 JS 语法预检，最后备份/覆盖，重启生效。替换仍是旧覆盖机制，不宣称断电原子性；宿主锁仍仅探测，不是真持锁。
 - 改代码时别破坏这两个端点；`applyUpdate` 有 `remoteVersion`/`localTarball` 测试注入口。
 
 ---

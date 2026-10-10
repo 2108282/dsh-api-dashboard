@@ -20,6 +20,10 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
     let react = require("react");
     let _ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
+    let reactDom = null;
+    try { reactDom = require("react-dom"); } catch { /* 非浏览器测试垫片 */ }
+    const overlayToBody = (node) => reactDom?.createPortal && typeof document !== "undefined" && document.body
+      ? reactDom.createPortal(node, document.body) : node;
 
     //#region 品牌官方 SVG 图标
     const ICONS = {
@@ -242,6 +246,27 @@ window.__ModuleLoader__.load({
     }
     //#endregion
 
+    function installOverlayEnvironment() {
+      if (typeof document === "undefined" || !document.documentElement?.style) return () => {};
+      const root = document.documentElement, vv = window.visualViewport;
+      let stableHeight = window.innerHeight || 640;
+      const editable = () => /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "") || document.activeElement?.isContentEditable;
+      const sync = () => {
+        const visible = vv?.height || window.innerHeight || stableHeight;
+        if (!editable()) stableHeight = Math.max(visible, window.innerHeight || visible);
+        root.style.setProperty("--dshadb-vh", stableHeight + "px");
+        root.style.setProperty("--dshadb-visible-h", visible + "px");
+        const dark = document.body?.hasAttribute?.("data-ds-dark-theme")
+          || (typeof getComputedStyle === "function" && getComputedStyle(document.body).colorScheme === "dark");
+        document.body?.setAttribute?.("data-dshadb-theme", dark ? "dark" : "light");
+      };
+      sync();
+      window.addEventListener("resize", sync); vv?.addEventListener("resize", sync);
+      const observer = typeof MutationObserver === "function" ? new MutationObserver(sync) : null;
+      observer?.observe(document.body, { attributes: true, attributeFilter: ["data-ds-dark-theme", "style"] });
+      return () => { window.removeEventListener("resize", sync); vv?.removeEventListener("resize", sync); observer?.disconnect(); document.body?.removeAttribute?.("data-dshadb-theme"); };
+    }
+
     //#region styles (A 风格)
     const CSS_ID = "dsh-api-dashboard/styles.css";
     if (typeof document !== "undefined" && document.querySelector('style[data-plugin-css="' + CSS_ID + '"]') === null) {
@@ -257,11 +282,11 @@ window.__ModuleLoader__.load({
    状态条就从 26px 变 28px, 把上面的会话区顶 2px(真机实测 CLS 0.00094+0.00053)。
    用 min-height 而不是 height: 系统字体放大时仍可自然增高, 不会裁字。
    28px = 有数据态的实测总高(20px 内容 + 4px 上下 padding), 所以有数据时外观完全不变。 */
-.dshadb_bar{display:inline-flex;align-items:center;gap:5px;font-size:11px;min-height:28px;box-sizing:border-box;padding:4px 10px 4px 6px;border-radius:10px;background:#f5f6f8;border:1px solid #e7e8ec;color:#777b84;cursor:pointer;white-space:nowrap;user-select:none;-webkit-tap-highlight-color:transparent}
+.dshadb_bar{display:inline-flex;align-items:center;gap:5px;font-size:11px;min-height:28px;box-sizing:border-box;padding:4px 10px 4px 6px;border-radius:10px;background:var(--dshadb-panel,#f5f6f8);border:1px solid var(--dshadb-border,#e7e8ec);color:var(--dshadb-muted,#777b84);cursor:pointer;white-space:nowrap;user-select:none;-webkit-tap-highlight-color:transparent}
 .dshadb_bar:active{opacity:0.8}
-.dshadb_bar_logo{width:16px;height:16px;border-radius:5px;background:#eef2ff;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:800;color:#4f7cff}
-.dshadb_bar_name{font-weight:700;color:#17181c;font-size:11px}
-.dshadb_bar_amount{font-weight:800;font-variant-numeric:tabular-nums;color:#17181c}
+.dshadb_bar_logo{width:16px;height:16px;border-radius:5px;background:var(--dshadb-logo,#eef2ff);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:800;color:#4f7cff}
+.dshadb_bar_name{font-weight:700;color:var(--dshadb-text,#17181c);font-size:11px}
+.dshadb_bar_amount{font-weight:800;font-variant-numeric:tabular-nums;color:var(--dshadb-text,#17181c)}
 /* C-4a (v1.4.1): .dshadb_bar_ok/warn/err 以前只有使用处、没有 CSS 规则(死类名),
    于是"负余额/低余额金额变红"从来没生效过, 只有小圆点变色。 */
 .dshadb_bar_ok{color:#2e9e5b}
@@ -276,7 +301,7 @@ window.__ModuleLoader__.load({
 .dshadb_bar_peak.valley{background:rgba(79,124,255,0.10);color:#3d5fcc;border:1px solid rgba(79,124,255,0.18)}
 
 /* ===== 遮罩 ===== */
-.dshadb_scrim{position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,0.35);animation:dshadb-fadein .15s ease-out;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.dshadb_scrim{position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,0.35);overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
 .dshadb_scrim::-webkit-scrollbar{display:none}
 /* v1.4.0: 手机壳 (dsh-web-mobile) 的「左边缘滑入打开侧边栏」手势层 —— 详见 AGENTS.md ①。
    它在 document **捕获**阶段吃 pointerdown, 起手点落在屏幕左侧 45% 内、横向位移占优时,
@@ -296,34 +321,38 @@ window.__ModuleLoader__.load({
    为什么要变量化: 内联 style 优先级高于样式表, 桌面档想改 max-height 就得挂 !important,
    而 !important 又会挡住「键盘弹出时动态收窄」—— 三个问题一起解决。
    --dshadb-kb 未定义时回退 0px, 所以手机端(没有键盘事件、JS 也没跑)与 v1.4.2 完全一致。 */
-.dshadb_drawer{position:fixed;left:0;right:0;bottom:var(--dshadb-kb,0px);z-index:99999;max-height:min(var(--dshadb-max-h,85vh),calc(100vh - var(--dshadb-kb,0px) - 12px));background:#f5f6f8;border-radius:20px 20px 0 0;box-shadow:0 -8px 32px rgba(0,0,0,0.12);display:flex;flex-direction:column;animation:dshadb-slideup .22s cubic-bezier(.16,1,.3,1);overflow:hidden;transition:bottom .18s ease-out}
+.dshadb_drawer{position:fixed;left:0;right:0;bottom:var(--dshadb-kb,0px);z-index:99999;max-height:min(var(--dshadb-max-h,85vh),calc(var(--dshadb-vh,100vh) - var(--dshadb-kb,0px) - 12px));background:var(--dshadb-panel,#f5f6f8);border-radius:20px 20px 0 0;box-shadow:0 -8px 32px rgba(0,0,0,0.12);display:flex;flex-direction:column;overflow:hidden;transition:none;overscroll-behavior:contain;min-height:0;height:auto}
 .dshadb_handle{display:flex;align-items:center;justify-content:center;padding:10px 0 6px;flex:none}
-.dshadb_handle_bar{width:38px;height:4px;border-radius:9px;background:#c9cad0}
+.dshadb_handle_bar{width:38px;height:4px;border-radius:9px;background:var(--dshadb-handle,#c9cad0)}
 
 /* ===== 头部 ===== */
 .dshadb_header{padding:12px 18px 10px;flex:none;display:flex;align-items:center;justify-content:space-between}
 .dshadb_header_left{flex:1}
-.dshadb_header_meta{font-size:11px;font-weight:600;color:#777b84}
-.dshadb_header_title{font-size:22px;font-weight:800;color:#17181c;letter-spacing:-0.5px;line-height:1.15}
-.dshadb_header_sub{font-size:11px;color:#777b84;margin-top:3px}
-.dshadb_header_settings{width:38px;height:38px;border-radius:13px;background:#ffffff;border:0;box-shadow:0 10px 30px rgba(0,0,0,0.07);display:flex;align-items:center;justify-content:center;color:#777b84;cursor:pointer;-webkit-tap-highlight-color:transparent}
-        .dshadb_header_back{width:38px;height:38px;border-radius:13px;background:#ffffff;border:0;box-shadow:0 10px 30px rgba(0,0,0,0.07);display:flex;align-items:center;justify-content:center;color:#777b84;cursor:pointer;-webkit-tap-highlight-color:transparent}.dshadb_header_back:active{opacity:0.8;transform:scale(0.95)}
+.dshadb_header_meta{font-size:11px;font-weight:600;color:var(--dshadb-muted,#777b84)}
+.dshadb_header_title{font-size:22px;font-weight:800;color:var(--dshadb-text,#17181c);letter-spacing:-0.5px;line-height:1.15}
+.dshadb_header_sub{font-size:11px;color:var(--dshadb-muted,#777b84);margin-top:3px}
+.dshadb_header_settings{width:38px;height:38px;border-radius:13px;background:var(--dshadb-surface,#ffffff);border:0;box-shadow:0 10px 30px rgba(0,0,0,0.07);display:flex;align-items:center;justify-content:center;color:var(--dshadb-muted,#777b84);cursor:pointer;-webkit-tap-highlight-color:transparent}
+        .dshadb_header_back{width:38px;height:38px;border-radius:13px;background:var(--dshadb-surface,#ffffff);border:0;box-shadow:0 10px 30px rgba(0,0,0,0.07);display:flex;align-items:center;justify-content:center;color:var(--dshadb-muted,#777b84);cursor:pointer;-webkit-tap-highlight-color:transparent}.dshadb_header_back:active{opacity:0.8;transform:scale(0.95)}
 .dshadb_header_settings:active{opacity:0.8;transform:scale(0.95)}
-.dshadb_refresh_btn{display:inline-flex;align-items:center;gap:4px;background:transparent;border:none;padding:0;font-size:11px;font-weight:600;color:#777b84;cursor:pointer;font-family:inherit}
+.dshadb_refresh_btn{display:inline-flex;align-items:center;gap:4px;background:transparent;border:none;padding:0;font-size:11px;font-weight:600;color:var(--dshadb-muted,#777b84);cursor:pointer;font-family:inherit}
 .dshadb_refresh_btn:active{opacity:0.7}
 
 /* ===== 内容区 ===== */
-.dshadb_body{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:0 14px max(16px,env(safe-area-inset-bottom))}
+.dshadb_settings_drawer{height:min(var(--dshadb-max-h,86vh),calc(var(--dshadb-visible-h,100vh) - 12px))}
+.dshadb_body{flex:0 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:0 14px max(16px,env(safe-area-inset-bottom))}
+.dshadb_update_dialog{position:fixed;left:50%;top:calc((100% - var(--dshadb-kb,0px))/2);transform:translate(-50%,-50%);width:min(560px,calc(100% - 28px));max-height:calc(88vh - var(--dshadb-kb,0px));overflow-y:auto;box-sizing:border-box;padding:20px;border-radius:16px;background:var(--dshadb-surface,#fff);color:var(--dshadb-text,#17181c);box-shadow:0 12px 48px rgba(0,0,0,.22);font-size:13px;line-height:1.6}
+.dshadb_update_dialog h3{margin:0 0 12px;font-size:18px}.dshadb_update_dialog h4{margin:16px 0 6px}.dshadb_update_dialog li{overflow-wrap:anywhere}.dshadb_update_summary{white-space:pre-wrap;overflow-wrap:anywhere;max-height:28vh;overflow-y:auto}.dshadb_update_actions{display:flex;gap:10px;margin-top:16px}.dshadb_update_actions button{flex:1;padding:10px}.dshadb_update_actions button:disabled{opacity:.45;cursor:not-allowed}
+
 
 /* ===== 分组头 ===== */
 .dshadb_group{margin-top:4px}
 .dshadb_group_head{display:flex;align-items:center;justify-content:space-between;padding:14px 4px 8px;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent;transition:opacity .15s ease}
 .dshadb_group_head:active{opacity:0.7}
-.dshadb_group_label{font-size:13px;font-weight:750;color:#17181c}
-.dshadb_group_meta{font-size:10px;font-weight:600;color:#777b84}
+.dshadb_group_label{font-size:13px;font-weight:750;color:var(--dshadb-text,#17181c)}
+.dshadb_group_meta{font-size:10px;font-weight:600;color:var(--dshadb-muted,#777b84)}
 
 /* ===== 卡片（核心） ===== */
-.dshadb_card{display:flex;align-items:center;gap:10px;padding:13px 14px;margin-bottom:9px;border-radius:18px;background:#ffffff;border:1px solid #e7e8ec;box-shadow:0 6px 20px rgba(0,0,0,0.03);cursor:pointer;position:relative;transition:transform .12s ease,box-shadow .2s ease,border-color .2s ease;-webkit-tap-highlight-color:transparent;animation:dshadb-fadein .2s ease-out}
+.dshadb_card{display:flex;align-items:center;gap:10px;padding:13px 14px;margin-bottom:9px;border-radius:18px;background:var(--dshadb-surface,#ffffff);border:1px solid var(--dshadb-border,#e7e8ec);box-shadow:0 6px 20px rgba(0,0,0,0.03);cursor:pointer;position:relative;transition:transform .12s ease,box-shadow .2s ease,border-color .2s ease;-webkit-tap-highlight-color:transparent;animation:dshadb-fadein .2s ease-out}
 .dshadb_card:active{transform:scale(0.985);box-shadow:0 6px 20px rgba(0,0,0,0.05)}
 @media(hover:hover){.dshadb_card:hover{box-shadow:0 8px 25px rgba(0,0,0,0.06);border-color:#d0d2d8}}
 /* v1.5.0-desktop-preview: 桌面 / **平板**两档断点 —— 抽屉不再横铺整个窗口。
@@ -356,7 +385,7 @@ window.__ModuleLoader__.load({
         留着它反而会挡住「键盘弹出时按 --dshadb-kb 动态收窄」。
      ③ 高度/位置都按 --dshadb-kb 让位: 对话框原本在**布局视口**里居中, 键盘弹出后布局视口不变,
         底部 26%(真机实测 242px 键盘 / 630px 面板)会被盖住。改成在「可视区」里重新居中。 */
-@media (min-width:1024px) and (min-height:600px),(min-width:1024px) and (pointer:fine){.dshadb_drawer{top:calc((100vh - var(--dshadb-kb,0px)) / 2);bottom:auto;transform:translateY(-50%);width:min(720px,100vw - 64px);margin:0 auto;max-height:min(720px,80vh,calc(100vh - var(--dshadb-kb,0px) - 12px));border-radius:22px;box-shadow:0 24px 64px rgba(0,0,0,0.22);animation:dshadb-fadein .16s ease-out}.dshadb_cards{display:grid;grid-template-columns:1fr 1fr;gap:9px;align-items:start}.dshadb_cards .dshadb_card{margin-bottom:0}}
+@media (min-width:1024px) and (min-height:600px),(min-width:1024px) and (pointer:fine){.dshadb_drawer{top:calc((100vh - var(--dshadb-kb,0px)) / 2);bottom:auto;transform:translateY(-50%);width:min(720px,100vw - 64px);margin:0 auto;max-height:min(720px,80vh,calc(var(--dshadb-vh,100vh) - var(--dshadb-kb,0px) - 12px));border-radius:22px;box-shadow:0 24px 64px rgba(0,0,0,0.22);animation:none}.dshadb_cards{display:grid;grid-template-columns:1fr 1fr;gap:9px;align-items:start}.dshadb_cards .dshadb_card{margin-bottom:0}}
 /* v1.5.0-desktop-preview.5 (报告 §2.8): 下滑把手是**底部抽屉的语汇**, 居中对话框里多余。
    只在有精确指针时隐藏 —— iPad Pro 横屏(1366×1024)也落进对话框档, 而看板抽屉没有关闭按钮
    (只有 Esc / 点遮罩), 触摸设备上把手是唯一看得见的关闭抓手, 不能一起收掉。 */
@@ -385,18 +414,18 @@ window.__ModuleLoader__.load({
 body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !important}
 .dshadb_preview_banner{display:flex;flex-direction:column;gap:2px;margin:0 0 10px;padding:9px 11px;border-radius:12px;background:#fff8e6;border:1px solid #f0d9a0;color:#7a5b12;font-size:11px;font-weight:600;line-height:1.5}
 .dshadb_preview_banner b{font-size:12px;font-weight:800;color:#6b4d06}
-@media (prefers-color-scheme:dark){.dshadb_preview_banner{background:#3a3016;border-color:#6b5a24;color:#f2dfae}.dshadb_preview_banner b{color:#ffe9b0}}
-.dshadb_card_active{background:#f0f4ff;border-color:rgba(79,124,255,0.25);box-shadow:0 6px 20px rgba(79,124,255,0.06);transition:all .2s ease}
-.dshadb_card_logo{width:35px;height:35px;border-radius:12px;background:#eef2ff;display:flex;align-items:center;justify-content:center;flex:none;font-size:16px;font-weight:800;color:#17181c;overflow:hidden}
+
+.dshadb_card_active{background:var(--dshadb-active,#f0f4ff);border-color:rgba(79,124,255,0.25);box-shadow:0 6px 20px rgba(79,124,255,0.06);transition:all .2s ease}
+.dshadb_card_logo{width:35px;height:35px;border-radius:12px;background:var(--dshadb-logo,#eef2ff);display:flex;align-items:center;justify-content:center;flex:none;font-size:16px;font-weight:800;color:var(--dshadb-text,#17181c);overflow:hidden}
 .dshadb_card_logo svg{width:22px;height:22px;display:block}
 .dshadb_imglogo{display:flex;align-items:center;justify-content:center;width:100%;height:100%}
-.dshadb_texticon{display:flex;align-items:center;justify-content:center;width:100%;height:100%;border-radius:8px;color:#fff;font-weight:800;font-size:13px;line-height:1}
+.dshadb_texticon{display:flex;align-items:center;justify-content:center;width:100%;height:100%;border-radius:8px;color:var(--dshadb-surface,#fff);font-weight:800;font-size:13px;line-height:1}
 .dshadb_card_info{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
-.dshadb_card_name{font-size:14px;font-weight:750;color:#17181c;line-height:1.25}
-.dshadb_card_desc{font-size:10px;color:#777b84;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dshadb_card_name{font-size:14px;font-weight:750;color:var(--dshadb-text,#17181c);line-height:1.25}
+.dshadb_card_desc{font-size:10px;color:var(--dshadb-muted,#777b84);line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dshadb_card_right{display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex:none}
-.dshadb_card_amount{font-size:16px;font-weight:850;font-variant-numeric:tabular-nums;color:#17181c;letter-spacing:-0.3px;line-height:1.1}
-.dshadb_card_amount_sub{font-size:13px;font-weight:700;color:#777b84}
+.dshadb_card_amount{font-size:16px;font-weight:850;font-variant-numeric:tabular-nums;color:var(--dshadb-text,#17181c);letter-spacing:-0.3px;line-height:1.1}
+.dshadb_card_amount_sub{font-size:13px;font-weight:700;color:var(--dshadb-muted,#777b84)}
 .dshadb_card_status{display:flex;align-items:center;gap:4px;font-size:9px;font-weight:600}
 .dshadb_card_status_ok{color:#35b56b}
 .dshadb_card_status_warn{color:#e6a72f}
@@ -405,41 +434,41 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
 .dshadb_status_dot_ok{background:#35b56b}
 .dshadb_status_dot_warn{background:#e6a72f}
 .dshadb_status_dot_err{background:#e05252}
-.dshadb_card_chevron{color:#9ca0aa;font-size:18px;margin-left:2px}
+.dshadb_card_chevron{color:var(--dshadb-secondary,#9ca0aa);font-size:18px;margin-left:2px}
 
 /* ===== 底部按钮 ===== */
-.dshadb_add_btn{display:flex;align-items:center;justify-content:center;gap:5px;padding:10px;border-radius:12px;background:#ffffff;color:#17181c;font-size:12px;font-weight:700;border:1px solid #e7e8ec;cursor:pointer;font-family:inherit;box-shadow:0 6px 20px rgba(0,0,0,0.03);transition:transform .12s ease,box-shadow .2s ease}
+.dshadb_add_btn{display:flex;align-items:center;justify-content:center;gap:5px;padding:10px;border-radius:12px;background:var(--dshadb-surface,#ffffff);color:var(--dshadb-text,#17181c);font-size:12px;font-weight:700;border:1px solid var(--dshadb-border,#e7e8ec);cursor:pointer;font-family:inherit;box-shadow:0 6px 20px rgba(0,0,0,0.03);transition:transform .12s ease,box-shadow .2s ease}
 .dshadb_add_btn:active{transform:scale(0.97);opacity:0.9}
 
 /* ===== 空状态 ===== */
-.dshadb_empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 20px;color:#777b84;font-size:13px;gap:10px;text-align:center}
+.dshadb_empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 20px;color:var(--dshadb-muted,#777b84);font-size:13px;gap:10px;text-align:center}
 
 /* ===== 骨架屏 ===== */
-.dshadb_skeleton{display:flex;align-items:center;gap:10px;padding:13px 14px;margin-bottom:9px;border-radius:18px;background:#ffffff;border:1px solid #e7e8ec}
-.dshadb_skeleton_logo{width:35px;height:35px;border-radius:12px;background:#eef2ff;flex:none}
+.dshadb_skeleton{display:flex;align-items:center;gap:10px;padding:13px 14px;margin-bottom:9px;border-radius:18px;background:var(--dshadb-surface,#ffffff);border:1px solid var(--dshadb-border,#e7e8ec)}
+.dshadb_skeleton_logo{width:35px;height:35px;border-radius:12px;background:var(--dshadb-logo,#eef2ff);flex:none}
 .dshadb_skeleton_lines{flex:1;display:flex;flex-direction:column;gap:6px}
-.dshadb_skeleton_line{height:10px;border-radius:999px;background:#e7e8ec}
+.dshadb_skeleton_line{height:10px;border-radius:999px;background:var(--dshadb-border,#e7e8ec)}
 .dshadb_skeleton_line_short{width:45%}
 .dshadb_skeleton_line_long{width:70%}
 
 /* ===== Footer ===== */
-.dshadb_footer{text-align:center;font-size:10px;color:#9ca0aa;padding:12px 14px 8px}
+.dshadb_footer{text-align:center;font-size:10px;color:var(--dshadb-secondary,#9ca0aa);padding:12px 14px 8px}
 /* ===== v1.6.3 今日总结 ===== */
-.dshadb_today{margin:0 0 10px;padding:12px 14px;border-radius:16px;background:#ffffff;border:1px solid #e7e8ec;box-shadow:0 6px 20px rgba(0,0,0,0.03);animation:dshadb-fadein .25s ease-out}
+.dshadb_today{margin:0 0 10px;padding:12px 14px;border-radius:16px;background:var(--dshadb-surface,#ffffff);border:1px solid var(--dshadb-border,#e7e8ec);box-shadow:0 6px 20px rgba(0,0,0,0.03);animation:dshadb-fadein .25s ease-out}
 .dshadb_today_head{display:flex;align-items:baseline;gap:8px}
-.dshadb_today_title{font-size:12px;font-weight:750;color:#17181c}
-.dshadb_today_money{margin-left:auto;font-size:15px;font-weight:850;font-variant-numeric:tabular-nums;color:#17181c;letter-spacing:-0.2px}
-.dshadb_today_tokens{font-size:10.5px;font-weight:600;color:#9ca0aa;margin-top:3px}
-.dshadb_today_bar{display:flex;height:6px;border-radius:999px;overflow:hidden;margin-top:9px;background:#eef0f4}
+.dshadb_today_title{font-size:12px;font-weight:750;color:var(--dshadb-text,#17181c)}
+.dshadb_today_money{margin-left:auto;font-size:15px;font-weight:850;font-variant-numeric:tabular-nums;color:var(--dshadb-text,#17181c);letter-spacing:-0.2px}
+.dshadb_today_tokens{font-size:10.5px;font-weight:600;color:var(--dshadb-secondary,#9ca0aa);margin-top:3px}
+.dshadb_today_bar{display:flex;height:6px;border-radius:999px;overflow:hidden;margin-top:9px;background:var(--dshadb-divider,#eef0f4)}
 .dshadb_today_seg{display:block;height:100%;transition:width .3s ease}
 .dshadb_today_legend{display:flex;flex-wrap:wrap;gap:4px 10px;margin-top:7px}
-.dshadb_today_item{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;color:#777b84;max-width:100%}
+.dshadb_today_item{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;color:var(--dshadb-muted,#777b84);max-width:100%}
 .dshadb_today_dot{width:6px;height:6px;border-radius:50%;flex:none}
-.dshadb_today_item b{margin-left:2px;font-weight:800;color:#17181c;font-variant-numeric:tabular-nums}
+.dshadb_today_item b{margin-left:2px;font-weight:800;color:var(--dshadb-text,#17181c);font-variant-numeric:tabular-nums}
 /* v1.6.0: 抽屉底部的充值入口提示 —— 光把入口放进设置里等于没人看（维护者原话）。 */
-.dshadb_topup_hint{display:flex;align-items:center;gap:7px;width:100%;padding:10px 14px;border:none;border-top:1px solid #eef0f4;background:transparent;color:#6b7280;font-size:11.5px;font-weight:650;font-family:inherit;cursor:pointer;text-align:left;-webkit-tap-highlight-color:transparent;transition:background .12s ease}
-.dshadb_topup_hint:active{background:#f5f6f8}
-.dshadb_topup_hint_arrow{margin-left:auto;color:#9ca0aa;font-size:16px;line-height:1}
+.dshadb_topup_hint{display:flex;align-items:center;gap:7px;width:100%;padding:10px 14px;border:none;border-top:1px solid var(--dshadb-divider,#eef0f4);background:transparent;color:#6b7280;font-size:11.5px;font-weight:650;font-family:inherit;cursor:pointer;text-align:left;-webkit-tap-highlight-color:transparent;transition:background .12s ease}
+.dshadb_topup_hint:active{background:var(--dshadb-panel,#f5f6f8)}
+.dshadb_topup_hint_arrow{margin-left:auto;color:var(--dshadb-secondary,#9ca0aa);font-size:16px;line-height:1}
 
 /* ===== 分组折叠动画 ===== */
 .dshadb_group_body{max-height:0;opacity:0;overflow:hidden;transition:max-height .3s cubic-bezier(.4,0,.2,1),opacity .2s ease-out;will-change:max-height,opacity}
@@ -450,7 +479,7 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
 /* ===== 设置面板 ===== */
 .dshadb_settings_body{padding:4px 14px}
 .dshadb_settings_section{margin-bottom:14px}
-.dshadb_settings_group_title{font-size:11px;color:#777b84;font-weight:750;margin:13px 5px 7px;text-transform:uppercase;letter-spacing:0.4px}
+.dshadb_settings_group_title{font-size:11px;color:var(--dshadb-muted,#777b84);font-weight:750;margin:13px 5px 7px;text-transform:uppercase;letter-spacing:0.4px}
 .dshadb_switch{margin-left:auto;width:42px;height:25px;border-radius:20px;background:#c8cad0;padding:3px;cursor:pointer;transition:background .2s ease;border:none;flex:none}
 .dshadb_switch_on{background:#4f7cff}
 .dshadb_switch_knob{display:block;width:19px;height:19px;background:white;border-radius:50%;transition:transform .18s ease}
@@ -459,62 +488,62 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
 /* Tab 导航 */
 .dshadb_tabs{display:flex;gap:7px;padding:4px 0 12px;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
 .dshadb_tabs::-webkit-scrollbar{display:none}
-.dshadb_tab{flex:none;border:0;background:#e9eaf0;border-radius:12px;padding:8px 13px;font-size:11px;color:#686c76;white-space:nowrap;cursor:pointer;font-family:inherit;transition:all .12s ease}
-.dshadb_tab_active{background:#4f7cff;color:#fff}
+.dshadb_tab{flex:none;border:0;background:var(--dshadb-tab,#e9eaf0);border-radius:12px;padding:8px 13px;font-size:11px;color:var(--dshadb-tabtext,#686c76);white-space:nowrap;cursor:pointer;font-family:inherit;transition:all .12s ease}
+.dshadb_tab_active{background:#4f7cff;color:var(--dshadb-surface,#fff)}
 
 /* 输入框 */
-.dshadb_field{width:100%;padding:11px 14px;border-radius:12px;border:1px solid #e7e8ec;background:#ffffff;color:#17181c;font-size:13px;font-family:inherit;box-sizing:border-box;margin-bottom:10px;transition:border-color .15s ease}
+.dshadb_field{width:100%;padding:11px 14px;border-radius:12px;border:1px solid var(--dshadb-border,#e7e8ec);background:var(--dshadb-surface,#ffffff);color:var(--dshadb-text,#17181c);font-size:13px;font-family:inherit;box-sizing:border-box;margin-bottom:10px;transition:border-color .15s ease}
 .dshadb_field:focus{outline:none;border-color:#4f7cff}
 .dshadb_textarea{resize:vertical;min-height:56px;line-height:1.5;margin-bottom:6px}
 /* provider 自动判定结果标签 */
 .dshadb_kinds{margin:8px 0 4px}
-.dshadb_kinds_title{display:block;font-size:10px;font-weight:700;color:#9ca0aa;margin-bottom:5px}
-.dshadb_kinds_empty{display:block;font-size:10px;color:#9ca0aa;line-height:1.5}
+.dshadb_kinds_title{display:block;font-size:10px;font-weight:700;color:var(--dshadb-secondary,#9ca0aa);margin-bottom:5px}
+.dshadb_kinds_empty{display:block;font-size:10px;color:var(--dshadb-secondary,#9ca0aa);line-height:1.5}
 .dshadb_kinds_list{display:flex;flex-wrap:wrap;gap:5px}
 .dshadb_kind{font-size:10px;font-weight:600;padding:3px 8px;border-radius:999px;border:1px solid;white-space:nowrap}
 .dshadb_kind_official{background:rgba(52,199,89,0.10);border-color:rgba(52,199,89,0.28);color:#2a8c4a}
 .dshadb_kind_relay{background:rgba(142,142,147,0.10);border-color:rgba(142,142,147,0.26);color:#6f737c}
-.dshadb_label{font-size:11px;font-weight:700;color:#777b84;margin-bottom:4px;display:block}
+.dshadb_label{font-size:11px;font-weight:700;color:var(--dshadb-muted,#777b84);margin-bottom:4px;display:block}
 .dshadb_grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.dshadb_save_btn{width:100%;padding:14px;border-radius:15px;background:#17181c;color:#fff;font-size:15px;font-weight:800;border:none;cursor:pointer;font-family:inherit;transition:opacity .1s ease}
+.dshadb_save_btn{width:100%;padding:14px;border-radius:15px;background:var(--dshadb-text,#17181c);color:var(--dshadb-surface,#fff);font-size:15px;font-weight:800;border:none;cursor:pointer;font-family:inherit;transition:opacity .1s ease}
 .dshadb_save_btn:active{opacity:0.85}
 
 /* ===== 详情页 ===== */
 .dshadb_detail{display:flex;flex-direction:column;gap:12px;padding:4px 2px}
 .dshadb_detail_head{display:flex;align-items:center;gap:12px;padding:2px 2px 0;border-bottom:none}
-.dshadb_detail_logo{display:flex;align-items:center;justify-content:center;width:48px;height:48px;border-radius:14px;flex:none;background:#f0f2f8;padding:10px}
+.dshadb_detail_logo{display:flex;align-items:center;justify-content:center;width:48px;height:48px;border-radius:14px;flex:none;background:var(--dshadb-soft,#f0f2f8);padding:10px}
 .dshadb_detail_logo svg{width:100%;height:100%;display:block}
-.dshadb_detail_name{font-size:18px;font-weight:800;color:#17181c}
-.dshadb_detail_name_sub{font-size:11px;color:#777b84}
+.dshadb_detail_name{font-size:18px;font-weight:800;color:var(--dshadb-text,#17181c)}
+.dshadb_detail_name_sub{font-size:11px;color:var(--dshadb-muted,#777b84)}
 .dshadb_detail_bigwrap{display:flex;flex-direction:column;gap:2px;padding:8px 0 4px}
-.dshadb_detail_big{font-size:36px;font-weight:800;font-variant-numeric:tabular-nums;color:#17181c;letter-spacing:-1px;line-height:1.1}
-.dshadb_detail_label{font-size:11px;color:#777b84}
+.dshadb_detail_big{font-size:36px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--dshadb-text,#17181c);letter-spacing:-1px;line-height:1.1}
+.dshadb_detail_label{font-size:11px;color:var(--dshadb-muted,#777b84)}
 .dshadb_detail_metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:4px 0}
-.dshadb_detail_metric{display:flex;flex-direction:column;align-items:center;gap:4px;padding:12px 8px;border-radius:12px;background:#ffffff;border:1px solid #e7e8ec;animation:dshadb-fadein .25s ease-out}
-.dshadb_detail_metric_val{font-size:16px;font-weight:700;color:#17181c;font-variant-numeric:tabular-nums}
-.dshadb_detail_metric_label{font-size:10px;color:#777b84}
+.dshadb_detail_metric{display:flex;flex-direction:column;align-items:center;gap:4px;padding:12px 8px;border-radius:12px;background:var(--dshadb-surface,#ffffff);border:1px solid var(--dshadb-border,#e7e8ec);animation:dshadb-fadein .25s ease-out}
+.dshadb_detail_metric_val{font-size:16px;font-weight:700;color:var(--dshadb-text,#17181c);font-variant-numeric:tabular-nums}
+.dshadb_detail_metric_label{font-size:10px;color:var(--dshadb-muted,#777b84)}
 .dshadb_peakcard{display:flex;flex-direction:column;gap:5px;padding:12px 14px;border-radius:12px;margin-top:7px;border:1px solid;transition:all .2s ease}
 .dshadb_peakcard.peak{background:rgba(230,167,47,0.08);border-color:rgba(230,167,47,0.25)}
 .dshadb_peakcard.valley{background:rgba(79,124,255,0.06);border-color:rgba(79,124,255,0.20)}
 .dshadb_peakcard_title{font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px}
 .dshadb_peakcard.peak .dshadb_peakcard_title{color:#b07d1a}
 .dshadb_peakcard.valley .dshadb_peakcard_title{color:#3d5fcc}
-.dshadb_peakcard_sub{font-size:10px;color:#777b84}
-.dshadb_peakcard_slogan{font-size:11px;font-weight:600;color:#777b84;margin-top:3px;font-style:italic}
-.dshadb_pricelist{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:12px;background:#ffffff;border:1px solid #e7e8ec}
-.dshadb_pricelist_title{display:flex;align-items:center;justify-content:space-between;font-size:11px;font-weight:700;color:#777b84}
+.dshadb_peakcard_sub{font-size:10px;color:var(--dshadb-muted,#777b84)}
+.dshadb_peakcard_slogan{font-size:11px;font-weight:600;color:var(--dshadb-muted,#777b84);margin-top:3px;font-style:italic}
+.dshadb_pricelist{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:12px;background:var(--dshadb-surface,#ffffff);border:1px solid var(--dshadb-border,#e7e8ec)}
+.dshadb_pricelist_title{display:flex;align-items:center;justify-content:space-between;font-size:11px;font-weight:700;color:var(--dshadb-muted,#777b84)}
 .dshadb_price_nowtag{font-size:9px;padding:1px 7px;border-radius:999px;font-weight:600}
 .dshadb_price_nowtag.peak{background:rgba(230,167,47,0.12);color:#b07d1a}
 .dshadb_price_nowtag.valley{background:rgba(79,124,255,0.10);color:#3d5fcc}
 .dshadb_price_row{display:flex;align-items:center;justify-content:space-between;gap:8px}
-.dshadb_price_model{font-size:11px;font-weight:600;color:#17181c;flex:none}
-.dshadb_price_seg{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:8px;background:#f5f6f8;border:1px solid #e7e8ec;opacity:.75}
+.dshadb_price_model{font-size:11px;font-weight:600;color:var(--dshadb-text,#17181c);flex:none}
+.dshadb_price_seg{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:8px;background:var(--dshadb-panel,#f5f6f8);border:1px solid var(--dshadb-border,#e7e8ec);opacity:.75}
 .dshadb_price_seg_now{opacity:1;border-color:#4f7cff}
 .dshadb_price_seg_label{font-size:10px}
-.dshadb_price_seg_val{font-size:10.5px;font-weight:700;font-variant-numeric:tabular-nums;color:#17181c}
+.dshadb_price_seg_val{font-size:10.5px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--dshadb-text,#17181c)}
 
 /* ===== 补缺失CSS ===== */
-.dshadb_bar_cost{display:inline-flex;align-items:center;margin-left:2px;padding-left:8px;border-left:1px solid #e7e8ec;color:#9ca0aa;font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.dshadb_bar_cost{display:inline-flex;align-items:center;margin-left:2px;padding-left:8px;border-left:1px solid var(--dshadb-border,#e7e8ec);color:var(--dshadb-secondary,#9ca0aa);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
 /* ===== v1.4.0 子代理消耗行 =====
    设计约束: 无论几个子代理都**只占一行高度**(约 20px), 绝不换行挤压输入框。
    做法 = 固定 flex-wrap:nowrap + 横向滚动(隐藏滚动条) + 名字截断到 72px。
@@ -534,7 +563,7 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
   宿主变量 --dsh-composer-stack-gap(实测 6px), 改它会连带影响宿主自己的排版 ——
    所以只把我们这一份退回去: 负 margin-top = -(6px) - 2px, 净留 2px 呼吸。
    ⚠️ 想再紧/再松就只调这个值, 别动 28px 的 min-height(那是冷启动 LayoutShift 的钉子)。 */
-.dshadb_barwrap{display:flex;flex-direction:column;align-items:center;gap:0;width:fit-content;max-width:100%;min-width:0;margin:-8px auto 0}
+.dshadb_barwrap{display:flex;flex-direction:column;align-items:center;gap:0;width:fit-content;max-width:100%;min-width:0;margin:-12px auto 0}
 .dshadb_barrow{display:inline-flex;align-items:center;gap:2px;max-width:100%;min-width:0}
 /* v1.6.5: 窄屏溢出兜底 —— 真机反馈「状态条右侧的本会话消耗只剩个 ~ 被屏幕边缘切住」。
    状态条整条是 nowrap 的 inline-flex 胶囊: 平台名 / 金额 / 峰谷 / 本会话消耗 四段全是
@@ -570,37 +599,37 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
    这样"被切一半"看起来是有意的可滑动提示, 而不是被屏幕齐口截断。 */
 .dshadb_subs_overflow{-webkit-mask-image:linear-gradient(to right,#000 calc(100% - 20px),transparent);mask-image:linear-gradient(to right,#000 calc(100% - 20px),transparent)}
 .dshadb_subs::-webkit-scrollbar{display:none}
-.dshadb_sub{flex:none;display:inline-flex;align-items:center;gap:4px;font-size:10px;line-height:1.15;padding:2px 7px;border-radius:8px;background:#f5f6f8;border:1px solid #e7e8ec;color:#777b84;white-space:nowrap;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+.dshadb_sub{flex:none;display:inline-flex;align-items:center;gap:4px;font-size:10px;line-height:1.15;padding:2px 7px;border-radius:8px;background:var(--dshadb-panel,#f5f6f8);border:1px solid var(--dshadb-border,#e7e8ec);color:var(--dshadb-muted,#777b84);white-space:nowrap;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
 .dshadb_sub_dot{width:5px;height:5px;border-radius:50%;background:#8b93a7;flex:none}
-.dshadb_sub_name{font-weight:700;color:#17181c;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:72px}
+.dshadb_sub_name{font-weight:700;color:var(--dshadb-text,#17181c);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:72px}
 .dshadb_sub_amt{font-weight:800;font-variant-numeric:tabular-nums;color:#4f7cff;flex:none}
 /* 子代理长按详情浮层 (v1.4.0): 挂在 document.body 上, 不能被 .dshadb_subs 的
    overflow 裁掉; z-index 要高过抽屉(99999)/遮罩。纯展示, 不接收触摸事件。 */
-.dshadb_subtip{position:fixed;z-index:100000;max-width:min(280px,calc(100vw - 24px));padding:9px 11px;border-radius:12px;background:#17181c;color:#ffffff;font-size:11px;font-weight:600;line-height:1.6;white-space:pre-line;word-break:break-word;box-shadow:0 10px 30px rgba(0,0,0,0.3);pointer-events:none;animation:dshadb-fadein .12s ease-out}
-.dshadb_footer_dot{width:4px;height:4px;border-radius:50%;background:#c9cad0;opacity:0.5}
-.dshadb_group_divider{height:1px;background:#eef0f4;margin:2px 6px 4px}
-.dshadb_icon_btn{display:inline-flex;align-items:center;justify-content:center;min-width:38px;min-height:38px;padding:8px;border-radius:10px;background:transparent;border:none;color:#777b84;cursor:pointer;transition:background .1s ease}
-.dshadb_icon_btn:active{background:#f0f2f8;opacity:0.85}
-.dshadb_refresh_badge{font-size:9.5px;font-weight:600;color:#9ca0aa;background:#f0f2f8;padding:1px 7px;border-radius:999px;line-height:15px;white-space:nowrap}
+.dshadb_subtip{position:fixed;z-index:100000;max-width:min(280px,calc(100vw - 24px));padding:9px 11px;border-radius:12px;background:var(--dshadb-text,#17181c);color:var(--dshadb-surface,#ffffff);font-size:11px;font-weight:600;line-height:1.6;white-space:pre-line;word-break:break-word;box-shadow:0 10px 30px rgba(0,0,0,0.3);pointer-events:none;animation:dshadb-fadein .12s ease-out}
+.dshadb_footer_dot{width:4px;height:4px;border-radius:50%;background:var(--dshadb-handle,#c9cad0);opacity:0.5}
+.dshadb_group_divider{height:1px;background:var(--dshadb-divider,#eef0f4);margin:2px 6px 4px}
+.dshadb_icon_btn{display:inline-flex;align-items:center;justify-content:center;min-width:38px;min-height:38px;padding:8px;border-radius:10px;background:transparent;border:none;color:var(--dshadb-muted,#777b84);cursor:pointer;transition:background .1s ease}
+.dshadb_icon_btn:active{background:var(--dshadb-soft,#f0f2f8);opacity:0.85}
+.dshadb_refresh_badge{font-size:9.5px;font-weight:600;color:var(--dshadb-secondary,#9ca0aa);background:var(--dshadb-soft,#f0f2f8);padding:1px 7px;border-radius:999px;line-height:15px;white-space:nowrap}
 .dshadb_title_ic{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:7px;overflow:hidden;flex:none}
 /* ===== 设置面板 · 开关行 (v1.1.0) ===== */
-.dshadb_settings_row{display:flex;align-items:center;gap:12px;padding:12px 14px;margin:14px 0 4px;border-radius:16px;background:#ffffff;border:1px solid #e7e8ec;box-shadow:0 6px 20px rgba(0,0,0,0.03)}
+.dshadb_settings_row{display:flex;align-items:center;gap:12px;padding:12px 14px;margin:14px 0 4px;border-radius:16px;background:var(--dshadb-surface,#ffffff);border:1px solid var(--dshadb-border,#e7e8ec);box-shadow:0 6px 20px rgba(0,0,0,0.03)}
 .dshadb_settings_row_main{flex:1;min-width:0}
-.dshadb_settings_row_title{display:block;font-size:13px;font-weight:750;color:#17181c;line-height:1.3}
-.dshadb_settings_row_sub{display:block;font-size:10.5px;font-weight:500;color:#9ca0aa;line-height:1.45;margin-top:3px}
+.dshadb_settings_row_title{display:block;font-size:13px;font-weight:750;color:var(--dshadb-text,#17181c);line-height:1.3}
+.dshadb_settings_row_sub{display:block;font-size:10.5px;font-weight:500;color:var(--dshadb-secondary,#9ca0aa);line-height:1.45;margin-top:3px}
 /* ===== 设置面板 · 大肥鱼页 (v1.1.0) ===== */
-.dshadb_wf_row{display:flex;align-items:center;gap:10px;padding:11px 14px;margin-bottom:8px;border-radius:14px;background:#ffffff;border:1px solid #e7e8ec}
-.dshadb_wf_row_col{display:block;padding:11px 14px;margin-bottom:8px;border-radius:14px;background:#ffffff;border:1px solid #e7e8ec}
-.dshadb_wf_name{font-size:12.5px;font-weight:700;color:#17181c;flex:none}
-.dshadb_wf_sub{display:block;font-size:10px;font-weight:500;color:#9ca0aa;line-height:1.4;margin-top:2px}
+.dshadb_wf_row{display:flex;align-items:center;gap:10px;padding:11px 14px;margin-bottom:8px;border-radius:14px;background:var(--dshadb-surface,#ffffff);border:1px solid var(--dshadb-border,#e7e8ec)}
+.dshadb_wf_row_col{display:block;padding:11px 14px;margin-bottom:8px;border-radius:14px;background:var(--dshadb-surface,#ffffff);border:1px solid var(--dshadb-border,#e7e8ec)}
+.dshadb_wf_name{font-size:12.5px;font-weight:700;color:var(--dshadb-text,#17181c);flex:none}
+.dshadb_wf_sub{display:block;font-size:10px;font-weight:500;color:var(--dshadb-secondary,#9ca0aa);line-height:1.4;margin-top:2px}
 .dshadb_wf_head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
 .dshadb_wf_val{font-size:11px;font-weight:800;color:#4f7cff;font-variant-numeric:tabular-nums;flex:none}
 .dshadb_wf_range{width:100%;height:34px;accent-color:#4f7cff;margin:0}
 .dshadb_wf_seg{display:flex;gap:6px;margin-left:auto;flex:none}
-.dshadb_wf_segbtn{font-size:11px;font-weight:700;font-family:inherit;padding:6px 11px;border-radius:10px;border:1px solid #e7e8ec;background:#f5f6f8;color:#9ca0aa;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:background .15s ease,color .15s ease}
-.dshadb_wf_segbtn_on{background:#4f7cff;border-color:#4f7cff;color:#ffffff}
+.dshadb_wf_segbtn{font-size:11px;font-weight:700;font-family:inherit;padding:6px 11px;border-radius:10px;border:1px solid var(--dshadb-border,#e7e8ec);background:var(--dshadb-panel,#f5f6f8);color:var(--dshadb-secondary,#9ca0aa);cursor:pointer;-webkit-tap-highlight-color:transparent;transition:background .15s ease,color .15s ease}
+.dshadb_wf_segbtn_on{background:#4f7cff;border-color:#4f7cff;color:var(--dshadb-surface,#ffffff)}
 .dshadb_wf_disabled{opacity:.45;pointer-events:none}
-.dshadb_wf_tip{font-size:10.5px;color:#9ca0aa;line-height:1.5;padding:2px 4px 0}
+.dshadb_wf_tip{font-size:10.5px;color:var(--dshadb-secondary,#9ca0aa);line-height:1.5;padding:2px 4px 0}
 /* v1.6.8: 告警帮助区 —— 「发送测试提醒」按钮 + 系统通知开关引导。
    引导文案要说清「部分机型还要选提醒方式」，否则用户开了总开关仍收不到，会以为插件坏了。 */
 .dshadb_alert_help{display:flex;align-items:flex-start;gap:10px;margin:-4px 0 12px;padding:0 4px}
@@ -608,56 +637,23 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
 .dshadb_alert_help .dshadb_wf_segbtn:disabled{opacity:.5}
 .dshadb_alert_help .dshadb_wf_tip{flex:1;min-width:0;padding-top:4px}
 .dshadb_wf_avatar{flex:none;width:34px;height:34px;object-fit:contain;object-position:center;display:block;-webkit-user-drag:none;filter:drop-shadow(0 2px 4px rgba(0,0,0,.12))}
-@media (prefers-color-scheme:dark){
-.dshadb_wf_row,.dshadb_wf_row_col{background:#262a33;border-color:#363c48}
-.dshadb_wf_name{color:#f2f4f8}
-.dshadb_wf_segbtn{background:#1e222a;border-color:#363c48;color:#8b91a0}
-.dshadb_wf_segbtn_on{background:#4f7cff;border-color:#4f7cff;color:#fff}}
+
 /* ===== v1.4.0 设置界面控件统一 (此前是浏览器默认外观 + 无深色样式) =====
    注意: 曾把「币种」那几个 <select> 换成插件自己的分段按钮, 但在 2 列网格里
    「人民币」会被截成「人民…」, 观感反而更差 —— 已改回 <select>, 只做外观清理:
    去掉系统箭头/系统上下箭头, 让它长得跟旁边的 .dshadb_field 一致。 */
-.dshadb_field_select{-webkit-appearance:none;appearance:none;background-image:linear-gradient(45deg,transparent 50%,#9ca0aa 50%),linear-gradient(135deg,#9ca0aa 50%,transparent 50%);background-position:calc(100% - 18px) calc(50% - 2px),calc(100% - 13px) calc(50% - 2px);background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:36px}
+.dshadb_field_select{-webkit-appearance:none;appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--dshadb-secondary,#9ca0aa) 50%),linear-gradient(135deg,var(--dshadb-secondary,#9ca0aa) 50%,transparent 50%);background-position:calc(100% - 18px) calc(50% - 2px),calc(100% - 13px) calc(50% - 2px);background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:36px}
 /* 数字框去掉系统上下箭头 (手机上会挤掉输入区) */
 .dshadb_field[type=number]{-moz-appearance:textfield;appearance:textfield}
 .dshadb_field[type=number]::-webkit-outer-spin-button,.dshadb_field[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 /* 滑块: accent-color 只管颜色, 这里补齐轨道/滑块的圆润观感 */
 .dshadb_wf_range{-webkit-appearance:none;appearance:none;background:transparent}
-.dshadb_wf_range::-webkit-slider-runnable-track{height:6px;border-radius:999px;background:#e7e8ec}
-.dshadb_wf_range::-webkit-slider-thumb{-webkit-appearance:none;width:24px;height:24px;margin-top:-9px;border-radius:50%;background:#4f7cff;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.18)}
-.dshadb_wf_range::-moz-range-track{height:6px;border-radius:999px;background:#e7e8ec}
-.dshadb_wf_range::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:#4f7cff;border:2px solid #fff}
+.dshadb_wf_range::-webkit-slider-runnable-track{height:6px;border-radius:999px;background:var(--dshadb-border,#e7e8ec)}
+.dshadb_wf_range::-webkit-slider-thumb{-webkit-appearance:none;width:24px;height:24px;margin-top:-9px;border-radius:50%;background:#4f7cff;border:2px solid var(--dshadb-surface,#fff);box-shadow:0 1px 4px rgba(0,0,0,.18)}
+.dshadb_wf_range::-moz-range-track{height:6px;border-radius:999px;background:var(--dshadb-border,#e7e8ec)}
+.dshadb_wf_range::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:#4f7cff;border:2px solid var(--dshadb-surface,#fff)}
 /* 深色模式: 设置面板 + 状态条 + 子代理行 (此前这些一律硬编码白底, 深色下是白块) */
-@media (prefers-color-scheme:dark){
-.dshadb_field{background:#1e222a;border-color:#363c48;color:#f2f4f8}
-.dshadb_field::placeholder{color:#6b7280}
-.dshadb_field:focus{border-color:#4f7cff}
-.dshadb_field_select{background-image:linear-gradient(45deg,transparent 50%,#8b91a0 50%),linear-gradient(135deg,#8b91a0 50%,transparent 50%)}
-.dshadb_switch{background:#3d434f}
-.dshadb_switch_on{background:#4f7cff}
-.dshadb_switch_knob{background:#f2f4f8}
-.dshadb_tab{background:#262a33;color:#9aa1b0}
-.dshadb_tab_active{background:#4f7cff;color:#fff}
-.dshadb_settings_group_title{color:#8b91a0}
-.dshadb_kinds_title,.dshadb_kinds_empty{color:#7e8494}
-.dshadb_kind{background:#262a33;border-color:#363c48;color:#9aa1b0}
-.dshadb_bar{background:#262a33;border-color:#363c48;color:#9aa1b0}
-.dshadb_bar_name,.dshadb_bar_amount{color:#f2f4f8}
-.dshadb_bar_cost{border-left-color:#363c48;color:#8b91a0}
-.dshadb_topup_hint{border-top-color:#2c313b;color:#9aa1b0}
-.dshadb_today{background:#262a33;border-color:#363c48}
-.dshadb_today_title,.dshadb_today_money,.dshadb_today_item b{color:#f2f4f8}
-.dshadb_today_bar{background:#363c48}
-.dshadb_topup_hint:active{background:#22262e}
-.dshadb_topup_hint_arrow{color:#6b7280}
-.dshadb_subs .dshadb_sub,.dshadb_sub{background:#262a33;border-color:#363c48;color:#9aa1b0}
-.dshadb_sub_name{color:#f2f4f8}
-.dshadb_sub_amt{color:#7d9bff}
-.dshadb_subtip{background:#f2f4f8;color:#17181c;box-shadow:0 10px 30px rgba(0,0,0,0.5)}
-.dshadb_sub_dot{background:#8b93a7}
-.dshadb_wf_range::-webkit-slider-runnable-track{background:#363c48}
-.dshadb_wf_range::-moz-range-track{background:#363c48}
-}
+
 /* ===== 大肥鱼互动挂件 (v1.1.0) ===== */
 .dshadb-whale{position:fixed;left:0;top:60vh;z-index:9600;--dshw-scale:1;--dshw-size:clamp(calc(96px * var(--dshw-scale)),calc(min(150px,min(100vw,100vh) * 0.30) * var(--dshw-scale)),420px);width:var(--dshw-size);height:var(--dshw-size);pointer-events:none;-webkit-user-select:none;user-select:none;touch-action:none;transition:transform .45s cubic-bezier(.34,1.4,.64,1),left .3s ease,top .3s ease}
 .dshadb-whale.dshadb-whale-dragging{transition:none}
@@ -685,27 +681,36 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
 .dshadb-whale-locked .dshadb-whale-grab{pointer-events:none;cursor:default}
 .dshadb-whale-press .dshadb-whale-grab{cursor:grabbing}
 .dshadb-whale-img{width:100%;height:100%;object-fit:contain;display:block;pointer-events:none;-webkit-user-drag:none;filter:drop-shadow(0 6px 14px rgba(0,0,0,.18))}
-.dshadb-whale-bubble{position:absolute;left:50%;bottom:calc(100% + 6px);--dshw-bdx:0px;--dshw-btx:50%;transform:translateX(calc(-50% + var(--dshw-bdx))) translateY(10px) scale(.82);transform-origin:var(--dshw-btx) 100%;opacity:0;pointer-events:none;background:#fff;border-radius:16px;padding:10px 14px;min-width:112px;max-width:min(74vw,248px);box-shadow:0 8px 28px rgba(0,0,0,.16);transition:opacity .2s ease,transform .26s cubic-bezier(.34,1.5,.64,1);z-index:2;text-align:center;box-sizing:border-box}
-.dshadb-whale-bubble::after{content:"";position:absolute;left:var(--dshw-btx);top:100%;transform:translateX(-50%);border:8px solid transparent;border-top-color:#fff}
+.dshadb-whale-bubble{position:absolute;left:50%;bottom:calc(100% + 6px);--dshw-bdx:0px;--dshw-btx:50%;transform:translateX(calc(-50% + var(--dshw-bdx))) translateY(10px) scale(.82);transform-origin:var(--dshw-btx) 100%;opacity:0;pointer-events:none;background:var(--dshadb-surface,#fff);border-radius:16px;padding:10px 14px;min-width:112px;max-width:min(74vw,248px);box-shadow:0 8px 28px rgba(0,0,0,.16);transition:opacity .2s ease,transform .26s cubic-bezier(.34,1.5,.64,1);z-index:2;text-align:center;box-sizing:border-box}
+.dshadb-whale-bubble::after{content:"";position:absolute;left:var(--dshw-btx);top:100%;transform:translateX(-50%);border:8px solid transparent;border-top-color:var(--dshadb-surface,#fff)}
 .dshadb-whale-bubble-on{opacity:1;transform:translateX(calc(-50% + var(--dshw-bdx))) translateY(0) scale(1)}
 /* 连点时气泡不做淡出淡入的来回, 只跟位置走 —— 避免闪烁 */
 .dshadb-whale-bubble-on.dshadb-whale-bubble-keep{transition:transform .16s ease}
 /* 气泡在上方放不下时改到下方, 尾巴翻到顶边 */
 .dshadb-whale-bubble-below{bottom:auto;top:calc(100% + 6px);transform-origin:var(--dshw-btx) 0}
-.dshadb-whale-bubble-below::after{top:auto;bottom:100%;border-top-color:transparent;border-bottom-color:#fff}
+.dshadb-whale-bubble-below::after{top:auto;bottom:100%;border-top-color:transparent;border-bottom-color:var(--dshadb-surface,#fff)}
 /* 镜像只作用于鲸鱼本体, 气泡与文字保持正向 */
 .dshadb-whale-flip .dshadb-whale-bubble{transform:translateX(calc(-50% + var(--dshw-bdx))) translateY(10px) scale(.82)}
 .dshadb-whale-flip .dshadb-whale-bubble-on{transform:translateX(calc(-50% + var(--dshw-bdx))) translateY(0) scale(1)}
 .dshadb-whale-btext{display:block}
 .dshadb-whale-gif{display:none;width:100%;max-width:190px;border-radius:10px}
-.dshadb-whale-l-a{font-size:12.5px;font-weight:600;color:#3b4356;letter-spacing:.02em;line-height:1.4;white-space:nowrap}
-.dshadb-whale-l-b{font-size:21px;font-weight:800;color:#17181c;line-height:1.15;white-space:nowrap}
+.dshadb-whale-l-a{font-size:12.5px;font-weight:600;color:var(--dshadb-bubbletext,#3b4356);letter-spacing:.02em;line-height:1.4;white-space:nowrap}
+.dshadb-whale-l-b{font-size:21px;font-weight:800;color:var(--dshadb-text,#17181c);line-height:1.15;white-space:nowrap}
 .dshadb-whale-l-p{font-size:18px;font-weight:800;line-height:1.2;white-space:nowrap}
-.dshadb-whale-l-c{font-size:11px;font-weight:600;color:#9ca0aa;line-height:1.4;white-space:nowrap}
+.dshadb-whale-l-c{font-size:11px;font-weight:600;color:var(--dshadb-secondary,#9ca0aa);line-height:1.4;white-space:nowrap}
 .dshadb-whale-wrap{white-space:normal;word-break:break-word}
-@media (prefers-color-scheme:dark){
-.dshadb-whale-bubble{background:#262a33}.dshadb-whale-bubble::after{border-top-color:#262a33}
-.dshadb-whale-l-a{color:#d3d7e0}.dshadb-whale-l-b{color:#f2f4f8}.dshadb-whale-l-c{color:#9298a6}}`
+
+.dshadb_subtip{pointer-events:auto;white-space:normal;width:300px;max-width:calc(100vw - 32px);background:var(--dshadb-surface,#fff);color:var(--dshadb-text,#17181c);border:1px solid var(--dshadb-border,#e7e8ec);font-size:12px;padding:14px;line-height:1.5}
+.dshadb_subtip>strong{display:block;font-size:14px;margin-bottom:10px;overflow-wrap:anywhere}.dshadb_subtip_row{display:grid;grid-template-columns:66px minmax(0,1fr);gap:8px;margin:7px 0;align-items:start}.dshadb_subtip_row>span{color:var(--dshadb-muted,#777b84);font-weight:500}.dshadb_subtip_row>b{font-weight:600;overflow-wrap:anywhere}.dshadb_subtip>button{border:0;border-radius:8px;background:#4176e6;color:#fff;padding:7px 14px;margin-top:6px;float:right}
+.dshadb_session_subagents{margin:8px 0 12px;padding:14px;border-radius:18px;background:var(--dshadb-surface,#fff);border:1px solid var(--dshadb-border,#e7e8ec)}.dshadb_session_subagents .dshadb_subs{flex-direction:column;align-items:stretch;overflow:visible}.dshadb_session_subagents .dshadb_sub{padding:10px 12px;white-space:normal;justify-content:space-between}.dshadb_session_subagents .dshadb_sub_name{max-width:none;flex:1;text-align:left}
+.dshadb_field_select{background-size:5px 5px!important;background-repeat:no-repeat!important;background-position:calc(100% - 18px) calc(50% - 2px),calc(100% - 13px) calc(50% - 2px)!important}
+body.dshadb-whale-preview .dshadb-whale{z-index:100003}
+.dshadb_save_error{color:#e05252;margin:4px 4px 12px;overflow-wrap:anywhere;font-size:12px;line-height:1.5}
+/* Complete host theme; light defaults also override a dark OS when DSH is manually light. */
+body{--dshadb-panel:#f5f6f8;--dshadb-surface:#ffffff;--dshadb-text:#17181c;--dshadb-muted:#777b84;--dshadb-secondary:#9ca0aa;--dshadb-border:#e7e8ec;--dshadb-divider:#eef0f4;--dshadb-tab:#e9eaf0;--dshadb-tabtext:#686c76;--dshadb-logo:#eef2ff;--dshadb-active:#f0f4ff;--dshadb-soft:#f0f2f8;--dshadb-handle:#c9cad0;--dshadb-bubbletext:#3b4356;}
+body[data-dshadb-theme="dark"],body[data-ds-dark-theme]{--dshadb-panel:#202329;--dshadb-surface:#292d35;--dshadb-text:#f2f4f8;--dshadb-muted:#aeb5c2;--dshadb-secondary:#9099aa;--dshadb-border:#3a414d;--dshadb-divider:#343b47;--dshadb-tab:#303641;--dshadb-tabtext:#c0c7d2;--dshadb-logo:#303e5e;--dshadb-active:#273a60;--dshadb-soft:#303641;--dshadb-handle:#505968;--dshadb-bubbletext:#d3d7e0;}
+.dshadb_drawer{background:var(--dshadb-panel,#f5f6f8);color:var(--dshadb-text,#17181c)}.dshadb_body{min-height:0;overscroll-behavior:contain;overflow-anchor:none}.dshadb_update_dialog{color:var(--dshadb-text,#17181c)}.dshadb_field_select{background-color:var(--dshadb-surface,#fff)}.dshadb_switch_knob{background:#fff}.dshadb_tab_active,.dshadb_save_btn{color:#fff}.dshadb_save_btn{background:#4176e6}.dshadb_sub{font-family:inherit;cursor:pointer}.dshadb_bar_ok{color:#2e9e5b}.dshadb_bar_warn{color:#c8891a}.dshadb_bar_err{color:#d8443f}
+`
 
       document.head.appendChild(tag);
     }
@@ -743,7 +748,14 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
       "update.install": "一键更新", "update.installing": "下载安装中…",
       "update.done": "已更新, 重启 Web GUI 生效", "update.fail": "更新失败, 已保持原版本",
       "update.checkfail": "检查失败 (网络异常)",
-      "preview.title": "桌面 / 平板适配预览版 · 预发行",
+      "update.details": "新版本详情", "update.targets": "适配对象与版本范围", "update.runtime": "当前 DSH",
+      "update.summary": "更新摘要", "update.noSummary": "该版本未提供更新摘要。", "update.published": "发布时间",
+      "update.compatible": "适配当前版本，可以更新", "update.incompatible": "不适配当前 DSH，已禁止安装",
+      "update.unknown": "无法确认适配范围，已禁止一键安装", "update.unknownVersion": "未知",
+      "update.later": "暂不更新", "update.confirmInstall": "确认并安装", "update.viewDetails": "查看更新详情",
+      "update.restartHint": "安装前会再次检查兼容性；安装成功后需要重启 Web GUI。",
+      "update.changed": "目标版本或适配声明已变化，请重新检查并确认。", "update.busy": "更新正在进行，请勿重复安装。", "update.dependencies": "新版需要新增或升级依赖，请用宿主插件管理器安装；当前版本未改动。",
+      "preview.title": "预发行版本 · 非正式发行",
       "preview.body": "供电脑与平板试用：≥1024px 宽时面板变成居中对话框（卡片两列），768~1023px 收成居中 560px 面板；手机与手机横屏保持原样。预览版只在预览分支内自更新，不会被正式版覆盖。",
       "update.previewHint": "预览版不参与一键更新（避免被 main 上的正式版覆盖）",
       "update.previewChannelHint": "预览频道自更新：只会更新到该分支上的新预览版，不会被 main 的正式版覆盖 ·",
@@ -835,7 +847,14 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
       "update.install": "Update now", "update.installing": "Installing…",
       "update.done": "Updated. Restart Web GUI to apply", "update.fail": "Update failed, version unchanged",
       "update.checkfail": "Check failed (network)",
-      "preview.title": "Desktop / tablet preview — pre-release",
+      "update.details": "Update details", "update.targets": "Targets and supported versions", "update.runtime": "Current DSH",
+      "update.summary": "Release summary", "update.noSummary": "No release summary provided.", "update.published": "Published",
+      "update.compatible": "Compatible with this runtime", "update.incompatible": "Incompatible with this DSH; installation blocked",
+      "update.unknown": "Compatibility cannot be verified; one-click installation blocked", "update.unknownVersion": "Unknown",
+      "update.later": "Not now", "update.confirmInstall": "Confirm and install", "update.viewDetails": "View update details",
+      "update.restartHint": "Compatibility is checked again before installation. Restart Web GUI after updating.",
+      "update.changed": "The version or compatibility declaration changed. Check and confirm again.", "update.busy": "An update is already running.", "update.dependencies": "New or upgraded dependencies are required. Install through the host plugin manager; current version unchanged.",
+      "preview.title": "Pre-release build — not a stable release",
       "preview.body": "For desktop and tablet: at 1024px and wider the panel becomes a centred dialog with a two-column card grid, at 768-1023px a centred 560px sheet. Phones and phone-landscape keep the original layout. Preview builds update only within the preview branch, never to the stable release.",
       "update.previewHint": "Preview build: one-click update is off, so the stable line on main cannot overwrite it.",
       "update.previewChannelHint": "Preview-channel update: only newer previews on this branch, never the stable release on main ·",
@@ -925,11 +944,49 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
      * 超时的意义只是"别让一个彻底卡死的 socket 永远挂着"，不是给正常慢启动设上限。
      */
     const BALANCES_TIMEOUT_MS = 90000;
+    const requestDiagnostics = [];
+    function noteRequest(url, stage, value) {
+      if (!/^\/api-dashboard\/(config|whale\/settings|update)/.test(String(url))) return;
+      const record = { at: Date.now(), path: String(url).split("?")[0], stage, result: String(value || "").slice(0,160) };
+      requestDiagnostics.push(record); if (requestDiagnostics.length > 30) requestDiagnostics.shift();
+      if (typeof window !== "undefined") window.__dshadbRequestDiagnostics = requestDiagnostics;
+    }
+
     const fetchT = (url, opts, ms) => {
       const timeout = typeof ms === "number" ? ms : FETCH_TIMEOUT_MS;
       try { return fetch(url, { ...(opts || {}), signal: AbortSignal.timeout(timeout) }); }
       catch (e) { return fetch(url, opts); }
     };
+    // 写请求只发送一次；丢回复时以只读回查确认，不重放未知结果。
+    async function saveVerified(url, patch, select, transport = fetchT) {
+      let failure, readFailure = "未读取";
+      noteRequest(url, "write-start", "POST");
+      try {
+        const r = await transport(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+        noteRequest(url, "write-http", r.status);
+        let d; try { d = await r.json(); } catch { throw new Error("HTTP " + r.status + "，响应无法解析"); }
+        if (!r.ok || !d.ok) throw Object.assign(new Error("HTTP " + r.status + "：" + (d.error || "设置未保存")), { saveRejected: true });
+        return d;
+      } catch (e) {
+        if (e.saveRejected) throw e;
+        failure = e; noteRequest(url, "write-error", e.message);
+      }
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const r = await transport(url, { cache: "no-store", headers: { accept: "application/json" } });
+          noteRequest(url, "read-http", r.status);
+          const d = await r.json(); const stored = select(d);
+          readFailure = r.ok && d.ok ? "返回值与目标不一致" : "HTTP " + r.status;
+          noteRequest(url, "read-result", readFailure);
+          if (r.ok && d.ok && stored && Object.keys(patch).every(k =>
+            typeof patch[k] === "number" ? typeof stored[k] === "number" && Math.abs(stored[k] - patch[k]) < 1e-8 : stored[k] === patch[k])) {
+            return { ...d, ok: true, verifiedByReadback: true };
+          }
+        } catch (e) { readFailure = e.message; noteRequest(url, "read-error", readFailure); }
+        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 150));
+      }
+      throw new Error((failure?.message || "请求失败") + "；回查：" + readFailure + "，未确认保存");
+    }
     async function openConsole(fetchT, platform, url, win) {
       const w = win || (typeof window !== "undefined" ? window : null);
       /**
@@ -1006,8 +1063,8 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
       return inflight;
     }
     function schedule() {
-      if (timer !== null) return;
-      timer = setTimeout(() => { timer = null; if (document.hidden) return; refresh().then(schedule, schedule); }, pollMs);
+      if (!started || listeners.size === 0 || document.hidden || timer !== null) return;
+      timer = setTimeout(() => { timer = null; if (!started || listeners.size === 0 || document.hidden) return; refresh().then(schedule, schedule); }, pollMs);
     }
     const store = {
       subscribe(fn) { listeners.add(fn); if (!started) { started = true; refresh(false, true).then(schedule, schedule); } return () => { listeners.delete(fn); if (listeners.size === 0) { started = false; if (timer !== null) { clearTimeout(timer); timer = null; } } }; },
@@ -1057,7 +1114,7 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
      * user-select:none + -webkit-touch-callout:none 把系统菜单压掉。
      * 浮层必须挂 document.body —— 挂在胶囊里会被 .dshadb_subs 的 overflow-x:auto 裁掉。
      */
-    const SUBTIP_LONG_PRESS_MS = 420;
+    // 单击详情，不再依赖触屏长按。
     let subTipNode = null;
     let subTipTimer = 0;
     let subTipDismissBound = false;
@@ -1072,7 +1129,20 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
       if (!anchor || !text) return;
       const el = document.createElement("div");
       el.className = "dshadb_subtip";
-      el.textContent = text; // 纯文本, 不走 innerHTML (label 可能来自用户/模型)
+      el.setAttribute("role", "dialog");
+      el.setAttribute("aria-label", "子代理详情");
+      const lines = String(text).split("\n");
+      const title = document.createElement("strong"); title.textContent = lines.shift(); el.appendChild(title);
+      lines.forEach(line => {
+        const row = document.createElement("div"); row.className = "dshadb_subtip_row";
+        const split = line.indexOf(" ");
+        const label = document.createElement("span"); label.textContent = split >= 0 ? line.slice(0, split) : "";
+        const value = document.createElement("b"); value.textContent = split >= 0 ? line.slice(split + 1) : line;
+        row.appendChild(label); row.appendChild(value); el.appendChild(row);
+      });
+      const close = document.createElement("button"); close.type = "button"; close.textContent = "关闭"; close.onclick = hideSubagentTip; el.appendChild(close);
+      el.addEventListener("pointerdown", e => e.stopPropagation());
+      el.tabIndex = -1;
       document.body.appendChild(el);
       subTipNode = el;
       const rect = anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : null;
@@ -1085,45 +1155,28 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
       const left = rect ? rect.left : 12;
       el.style.left = Math.max(8, Math.min(vw - w - 8, left)) + "px";
       el.style.top = Math.max(8, top) + "px";
-      subTipTimer = setTimeout(hideSubagentTip, 5000);
+      // 单击详情保持可读，点外部或关闭按钮收起。
     }
     function bindSubTipDismiss() {
       if (subTipDismissBound) return;
       subTipDismissBound = true;
       // 点别处 / 滚动 / 转屏都收起。capture 阶段先于胶囊自己的 pointerdown 跑,
       // 所以「已开着一个浮层时再长按另一个胶囊」不会被立刻收掉。
-      document.addEventListener("pointerdown", hideSubagentTip, true);
+      document.addEventListener("pointerdown", (e) => { if (!subTipNode?.contains(e.target)) hideSubagentTip(); }, true);
       window.addEventListener("scroll", hideSubagentTip, true);
       window.addEventListener("resize", hideSubagentTip);
+      document.addEventListener("keydown", e => { if (e.key === "Escape") hideSubagentTip(); });
     }
     /** 给一个胶囊挂长按: 位移 > 8px(其实是在滑动这一行) 或抬手都取消; 长按抬手后的 click 吞掉。 */
     function bindSubagentTip(node, text) {
-      // C-4b (v1.4.1): ref 是内联箭头函数 → 每次 render 都重新调用本函数,
-      // 而这里挂 7 个 addEventListener 却从不 remove → 5 秒轮询下每小时约 5000 个监听器
-      // 堆在同一个胶囊节点上。改成"同一个节点只挂一次", tip 存在节点上按需读。
       node.__dshadbTip = text;
       if (node.__dshadbTipBound === true) return;
       node.__dshadbTipBound = true;
-      let timer = 0, sx = 0, sy = 0, fired = false;
-      const cancel = () => { if (timer) { clearTimeout(timer); timer = 0; } };
-      node.addEventListener("pointerdown", (e) => {
-        bindSubTipDismiss();
-        fired = false;
-        sx = e.clientX; sy = e.clientY;
-        cancel();
-        timer = setTimeout(() => { timer = 0; fired = true; showSubagentTip(node, node.__dshadbTip || text); }, SUBTIP_LONG_PRESS_MS);
-      });
-      node.addEventListener("pointermove", (e) => {
-        if (timer && (Math.abs(e.clientX - sx) > 8 || Math.abs(e.clientY - sy) > 8)) cancel();
-      });
-      node.addEventListener("pointerup", cancel);
-      node.addEventListener("pointercancel", cancel);
-      node.addEventListener("pointerleave", cancel);
-      // Android WebView 有时仍会弹系统「复制」长按菜单, 再压一道
-      node.addEventListener("contextmenu", (e) => e.preventDefault());
       node.addEventListener("click", (e) => {
-        if (fired) { fired = false; e.preventDefault(); e.stopPropagation(); }
+        e.preventDefault(); e.stopPropagation(); bindSubTipDismiss();
+        showSubagentTip(node, node.__dshadbTip || text);
       });
+      node.addEventListener("contextmenu", e => e.preventDefault());
     }
     /**
      * v1.4.0: 子代理消耗行节点 (换行显示在状态条下方, 左→右 = 服务端给的创建顺序)。
@@ -1161,8 +1214,8 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
             models ? "模型 " + models : "",
             s.id ? "ID " + String(s.id).slice(0, 8) : "",
           ].filter(Boolean).join("\n");
-          return react.createElement("span", {
-            className: "dshadb_sub", key: s.id || ("s" + i), title: tip, "data-tip": tip,
+          return react.createElement("button", {
+            type: "button", className: "dshadb_sub", key: s.id || ("s" + i), "aria-label": tip, "data-tip": tip,
             ref: (n) => { if (n) bindSubagentTip(n, tip); },
           }, [
             react.createElement("span", { className: "dshadb_sub_dot", key: "d" }),
@@ -1460,7 +1513,7 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
     //#endregion
 
     //#region 二层 看板面板
-    function DashboardDrawer({ isOpen, onClose, t, selectedId, onSelect, onOpenDetail, onAddRelay, onAddCustom, onOpenSettings, config, currentModel, today }) {
+    function DashboardDrawer({ isOpen, onClose, t, selectedId, onSelect, onOpenDetail, onAddRelay, onAddCustom, onOpenSettings, config, currentModel, today, subagentCost }) {
       const data = react.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
       const [isRefreshing, setRefreshing] = react.useState(false);
       const [openGroups, setOpenGroups] = react.useState({ domestic: false, abroad: false, relay: false, custom: false, nobalance: false });
@@ -1473,6 +1526,11 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
       if (!isOpen) return null;
       const handleRefresh = () => { setRefreshing(true); store.forceRefresh().then(() => setTimeout(() => setRefreshing(false), 500)); };
       const balances = data.balances || [];
+      const subagentSection = config?.showSubagentCapsules === false && subagentCost?.subagents?.length
+            ? react.createElement("section", { className: "dshadb_session_subagents", key: "sessionSubs" }, [
+                react.createElement("h3", { className: "dshadb_group_label", key: "title" }, "当前会话所用子代理"),
+                buildSubagentRow(subagentCost),
+              ]) : null;
       const isLoading = data.status === "loading" && balances.length === 0;
       // v1.4.1: 加载超过 4 秒就在骨架屏下面补一句「首次加载较慢」的解释（冷启动全量刷新实测 8~30s）
       const [slowLoad, setSlowLoad] = react.useState(false);
@@ -1651,6 +1709,7 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
           groups.domestic.length ? react.createElement(GroupSection, { label: t("domestic"), count: groups.domestic.length, open: openGroups.domestic, onToggle: () => toggle("domestic"), key: "g_domestic" }, groups.domestic.map(card)) : null,
           groups.abroad.length ? react.createElement(GroupSection, { label: t("abroad"), count: groups.abroad.length, open: openGroups.abroad, onToggle: () => toggle("abroad"), key: "g_abroad" }, groups.abroad.map(card)) : null,
           noBalanceBrands.length ? react.createElement(GroupSection, { label: t("brands"), count: noBalanceBrands.length, open: openGroups.nobalance, onToggle: () => toggle("nobalance"), key: "g_brands" }, noBalanceBrands.map(card)) : null,
+          subagentSection,
           groups.relay.length ? react.createElement(GroupSection, { label: t("relay"), count: groups.relay.length, open: openGroups.relay, onToggle: () => toggle("relay"), key: "g_relay" }, groups.relay.map(card)) : null,
           groups.custom.length ? react.createElement(GroupSection, { label: t("custom"), count: groups.custom.length, open: openGroups.custom, onToggle: () => toggle("custom"), key: "g_custom" }, groups.custom.map(card)) : null,
           // ③ 添加按钮居中两边对齐
@@ -1658,16 +1717,17 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
             react.createElement("button", { type: "button", className: "dshadb_add_btn", key: "add_relay", onClick: onAddRelay }, react.createElement(IconPlus, null), t("add.relay")),
             react.createElement("button", { type: "button", className: "dshadb_add_btn", key: "add_custom", onClick: onAddCustom }, react.createElement(IconPlus, null), t("add.custom")),
           ]),
-          react.createElement("div", { style: { fontSize: "10px", color: "#9ca0aa", padding: "8px 2px 2px", lineHeight: "1.5", textAlign: "center" }, key: "hint" }, [
+          react.createElement("div", { style: { fontSize: "10px", color: "var(--dshadb-secondary,#9ca0aa)", padding: "8px 2px 2px", lineHeight: "1.5", textAlign: "center" }, key: "hint" }, [
             "OpenAI、Claude、Gemini、Groq、Mistral 等平台未开放余额查询，请通过「添加自定义模型」配置。",
           ]),
         ];
       }
 
-      return react.createElement("div", { className: "dshadb_scrim", onClick: (e) => { if (e.target === e.currentTarget) onClose(); } }, [
+      if (balances.length === 0 && subagentSection) bodyContent = [bodyContent, subagentSection];
+      return overlayToBody(react.createElement("div", { className: "dshadb_scrim", onClick: (e) => { if (e.target === e.currentTarget) onClose(); } }, [
         // v1.4.0: 侧滑守卫 —— 让手机壳的「左边缘开侧边栏」手势层放弃识别 (CSS 与 AGENTS.md ① 有详解)
         react.createElement("div", { className: "dshadb_swipeguard", "aria-hidden": "true", key: "swipeguard" }),
-        react.createElement("div", { className: "dshadb_drawer", role: "dialog", "aria-label": t("title"), onClick: (e) => e.stopPropagation(), key: "drawer" }, [
+        react.createElement("div", { className: "dshadb_drawer", role: "dialog", "aria-label": t("title"), style: { "--dshadb-max-h": "85vh" }, onClick: (e) => e.stopPropagation(), key: "drawer" }, [
           react.createElement(SwipeHandle, { onClose, key: "handle" }),
           react.createElement("div", { className: "dshadb_header", key: "header" }, [
             react.createElement("div", { className: "dshadb_header_left", key: "left" }, [
@@ -1721,7 +1781,7 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
             react.createElement("button", { type: "button", className: "dshadb_refresh_badge", key: "ri", onClick: handleRefresh, title: t("refresh") }, "每 " + ((config && config.clientPollIntervalMs) ? Math.round(config.clientPollIntervalMs / 1000) : 5) + "s 刷新"),
           ]) : null,
         ]),
-      ]);
+      ]));
     }
     //#endregion
 
@@ -1797,7 +1857,7 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
       }
 
       // v0.5.3: 回退为底部抽屉样式 (全屏卡片观感不佳, 复用看板同款 scrim+drawer)
-      return react.createElement("div", { className: "dshadb_scrim", onClick: (e) => { if (e.target === e.currentTarget) onClose(); } }, [
+      return overlayToBody(react.createElement("div", { className: "dshadb_scrim", onClick: (e) => { if (e.target === e.currentTarget) onClose(); } }, [
         react.createElement("div", { className: "dshadb_swipeguard", "aria-hidden": "true", key: "swipeguard" }),
         react.createElement("div", { className: "dshadb_drawer", role: "dialog", "aria-label": meta.name, style: { "--dshadb-max-h": "70vh" }, onClick: (e) => e.stopPropagation(), key: "drawer" }, [
           react.createElement(SwipeHandle, { onClose, key: "handle" }),
@@ -1875,13 +1935,70 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
             ]),
           ]),
         ]),
-      ]);
+      ]));
+    }
+    //#endregion
+
+    //#region 更新详情（说明只作为纯文本展示，不能执行远端 HTML）
+    function updateCanInstall(info) {
+      return !!(info && info.ok && info.hasUpdate && info.canInstall === true
+        && info.compatibility?.status === "compatible" && typeof info.remote === "string"
+        && /^[a-f0-9]{64}$/.test(info.confirmationToken || ""));
+    }
+    function UpdateDetails({ info, t, busy, onClose, onInstall }) {
+      const root = react.useRef(null);
+      react.useEffect(() => {
+        const previous = document.activeElement;
+        const node = root.current;
+        if (node) node.focus();
+        const onKey = (e) => {
+          if (e.key === "Escape" && !busy) { e.preventDefault(); onClose(); }
+          if (e.key === "Tab" && node) {
+            const buttons = Array.from(node.querySelectorAll("button:not(:disabled)"));
+            const first = buttons[0], last = buttons[buttons.length - 1];
+            if (e.shiftKey && (document.activeElement === first || document.activeElement === node)) { e.preventDefault(); last?.focus(); }
+            else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+          }
+        };
+        document.addEventListener("keydown", onKey);
+        return () => { document.removeEventListener("keydown", onKey); if (previous?.isConnected) previous.focus(); };
+      }, [busy]);
+      const compatibility = info?.compatibility;
+      const state = compatibility?.status || "unknown";
+      const label = t("update." + state);
+      const requirements = compatibility?.requirements || [];
+      return overlayToBody(react.createElement("div", { className: "dshadb_scrim", style: { zIndex: 100001 },
+        onClick: (e) => { e.stopPropagation(); if (!busy && e.target === e.currentTarget) onClose(); } }, [
+        react.createElement("div", { className: "dshadb_swipeguard", "aria-hidden": "true", key: "guard" }),
+        react.createElement("div", { className: "dshadb_update_dialog", role: "dialog", "aria-label": t("update.details"), tabIndex: -1, ref: root, key: "dialog", onClick: e => e.stopPropagation() }, [
+          react.createElement("h3", { key: "title" }, t("update.details") + " · v" + info.remote),
+          react.createElement("p", { key: "versions" }, t("update.current") + ": v" + (info.current || "?") + " → v" + info.remote),
+          info.publishedAt ? react.createElement("p", { key: "date" }, t("update.published") + ": " + info.publishedAt) : null,
+          react.createElement("p", { key: "runtime" }, t("update.runtime") + ": " + (compatibility?.runtimeVersion || t("update.unknownVersion"))),
+          react.createElement("b", { key: "compat", style: { color: state === "compatible" ? "#35a66b" : "#c07828" } }, label),
+          react.createElement("h4", { key: "targets" }, t("update.targets")),
+          react.createElement("div", { key: "targetText" }, (compatibility?.targets || []).join(" / ") || "DSH Web"),
+          react.createElement("ul", { key: "ranges" }, requirements.map((r, i) => react.createElement("li", { key: i }, r.name + ": " + r.range))),
+          !requirements.length ? react.createElement("p", { key: "missing" }, t("update.unknown")) : null,
+          react.createElement("h4", { key: "summaryTitle" }, t("update.summary")),
+          react.createElement("div", { className: "dshadb_update_summary", key: "summary" }, info.summary || t("update.noSummary")),
+          react.createElement("p", { key: "restart" }, t("update.restartHint")),
+          react.createElement("div", { className: "dshadb_update_actions", key: "actions" }, [
+            react.createElement("button", { type: "button", className: "dshadb_add_btn", disabled: busy, onClick: onClose, key: "later" }, t("update.later")),
+            react.createElement("button", { type: "button", className: "dshadb_save_btn", disabled: busy || !updateCanInstall(info), onClick: () => { if (updateCanInstall(info)) onInstall(); }, key: "install" }, busy ? t("update.installing") : t("update.confirmInstall")),
+          ]),
+        ]),
+      ]));
     }
     //#endregion
 
     //#region 设置面板 (安全阈值 + 中转站)
     function SettingsModal({ isOpen, onClose, onBack, t, config, initialSection, underScrim }) {
       const [section, setSection] = react.useState(initialSection || "basic");
+      react.useEffect(() => {
+        document.body?.classList?.toggle("dshadb-whale-preview", isOpen && section === "whale");
+        return () => document.body?.classList?.remove("dshadb-whale-preview");
+      }, [isOpen, section]);
       const [relays, setRelays] = react.useState([]);
       const [models, setModels] = react.useState([]);
       const [safe, setSafe] = react.useState(50);
@@ -1898,6 +2015,10 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
       const [refreshSec, setRefreshSec] = react.useState(5);
       const [whaleOn, setWhaleOn] = react.useState(!!(config && config.whaleEnabled));
       const [showBrands, setShowBrands] = react.useState(!!(config && config.showNoBalanceBrands));
+      const [showSubs, setShowSubs] = react.useState(config?.showSubagentCapsules !== false);
+      const [subsSaving, setSubsSaving] = react.useState(false);
+      const subsDirty = react.useRef(false);
+      const [subsSaveError, setSubsSaveError] = react.useState("");
       // 官方直连 provider 名单 (第 1 层判定): 多行文本, 逗号/换行分隔
       const [officialText, setOfficialText] = react.useState(
         Array.isArray(config && config.officialProviders) ? config.officialProviders.join(", ") : "");
@@ -1934,6 +2055,8 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
        */
       const [consoleTargets, setConsoleTargets] = react.useState([]);
       // v1.1.0: 大肥鱼细项 (独立页签, 走 /api-dashboard/whale/settings, 与看板主配置分开)
+      const [whaleSaveError, setWhaleSaveError] = react.useState("");
+      const wfDirty = react.useRef(new Set());
       const [wf, setWf] = react.useState({
         scale: 1, peekRatio: 0.5, soundOn: true, soundSet: "duck",
         volume: 0.5, bubbleOn: true, peakMode: "default", snapOn: true,
@@ -1945,6 +2068,9 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
       // v0.6.2: 初值也用预热的检查结果,并直接推导出提示文案(已是最新也可见"✓"),
       // 避免打开瞬间空渲染再闪烁成提示; SSR/无 window 环境安全兜底.
       const initInfo = typeof window !== "undefined" ? (window.__dshadbUpdateInfo || null) : null;
+      const [updateDetailsOpen, setUpdateDetailsOpen] = react.useState(false);
+      const updateShown = react.useRef("");
+      const updateInstallingRef = react.useRef(false);
       const [upd, setUpd] = react.useState({
         phase: "idle", info: initInfo,
         msg: initInfo && initInfo.ok && !initInfo.hasUpdate ? t("update.latest") : "",
@@ -1957,27 +2083,36 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
             // v0.6.2: 检查完必有反馈 —— 已是最新也提示, 有新版提示版本号, 失败给固定文案
             const msg = d.ok ? (d.hasUpdate ? "" : t("update.latest")) : t("update.checkfail");
             setUpd({ phase: "idle", info: d, msg });
+            if (d.ok && d.hasUpdate && (force || updateShown.current !== d.remote)) {
+              updateShown.current = d.remote;
+              setUpdateDetailsOpen(true);
+            }
             if (typeof window !== "undefined") { window.__dshadbUpdateInfo = d; window.__dshadbUpdateCheckedAt = Date.now(); }
           })
           .catch(() => setUpd(s => ({ ...s, phase: "idle", msg: t("update.checkfail") })));
       }, []);
       react.useEffect(() => { if (isOpen) checkUpdate(false); }, [isOpen]);  // 打开面板自动检查
       const installUpdate = () => {
+        if (previewUpdateLocked || updateInstallingRef.current || !updateCanInstall(upd.info)) return;
+        updateInstallingRef.current = true;
         setUpd(s => ({ ...s, phase: "installing" }));
-        fetchT("/api-dashboard/update/install", { method: "POST" }, 120000)
+        fetchT("/api-dashboard/update/install", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expectedVersion: upd.info.remote, confirmationToken: upd.info.confirmationToken }) }, 120000)
           .then(r => r.json().then(d => ({ code: r.status, body: d })))
           .then(({ code, body }) => {
             if (code === 200 && body.ok) {
+              setUpdateDetailsOpen(false);
               setUpd({ phase: "done", info: { ok: true, current: body.installed, remote: body.installed, hasUpdate: false }, msg: t("update.done") });
               // v1.3.3: 更新完成后发 Toast 通知 —— 设置面板底部的 11px 灰色提示太容易被忽略,
               // 移动端尤其如此。Toast 在屏幕中央弹出, 不会被错过。
               try { fetch("/app/toast?text=" + encodeURIComponent("插件已更新到 v" + body.installed + "，重启 Web GUI 生效"), { mode: "no-cors" }).catch(() => {}); } catch {}
             } else {
-              setUpd(s => ({ ...s, phase: "fail", msg: body.error === "already up to date" ? t("update.latest") : t("update.fail") }));
-              checkUpdate(true);
+              const key = { "update-incompatible": "incompatible", "update-unknown": "unknown", "update-changed": "changed", "update-busy": "busy", "update-dependencies": "dependencies" }[body.error];
+              setUpd(s => ({ ...s, phase: "fail", msg: key ? t("update." + key) : body.error === "already up to date" ? t("update.latest") : t("update.fail") }));
             }
           })
-          .catch(() => setUpd(s => ({ ...s, phase: "fail", msg: t("update.fail") })));
+          .catch(() => setUpd(s => ({ ...s, phase: "fail", msg: t("update.fail") })))
+          .finally(() => { updateInstallingRef.current = false; });
       };
       // v0.6.1: 初始化仅在弹窗"从关到开"的瞬间执行一次。
       // 旧写法把 config 放进依赖数组 —— 看板轮询每 ~5s 换一次快照引用,
@@ -2014,6 +2149,7 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
             if (typeof d.currency === "string") setCurrency(d.currency);
             if (typeof d.overseasCurrency === "string") setOverseasCurrency(d.overseasCurrency);
             if (typeof d.whaleEnabled === "boolean") setWhaleOn(d.whaleEnabled);
+            if (!subsDirty.current && typeof d.showSubagentCapsules === "boolean") setShowSubs(d.showSubagentCapsules);
             if (Array.isArray(d.officialProviders)) setOfficialText(d.officialProviders.join(", "));
             if (d.providerKinds && typeof d.providerKinds === "object") setProviderKinds(d.providerKinds);
             if (Array.isArray(d.dshProviders)) setDshProviders(d.dshProviders);
@@ -2026,16 +2162,9 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
         fetchT("/api-dashboard/whale/settings", { cache: "no-store" }).then(r => r.json()).then(d => {
           if (cancelled || !d || !d.ok || !d.settings) return;
           const s = d.settings;
-          setWf(prev => ({
-            scale: typeof s.scale === "number" ? s.scale : prev.scale,
-            peekRatio: typeof s.peekRatio === "number" ? s.peekRatio : prev.peekRatio,
-            soundOn: typeof s.soundOn === "boolean" ? s.soundOn : prev.soundOn,
-            soundSet: s.soundSet || prev.soundSet,
-            volume: typeof s.volume === "number" ? s.volume : prev.volume,
-            bubbleOn: typeof s.bubbleOn === "boolean" ? s.bubbleOn : prev.bubbleOn,
-            peakMode: s.peakMode || prev.peakMode,
-            snapOn: typeof s.snapOn === "boolean" ? s.snapOn : prev.snapOn,
-          }));
+          setWf(prev => Object.fromEntries(Object.keys(prev).map(k => [k,
+            wfDirty.current.has(k) || s[k] === undefined ? prev[k] : s[k]
+          ])));
         }).catch(() => {});
         // v1.5.1: 告警通道状态（与上面两个并行拉，失败就维持「尚未检测」）
         fetchT("/api-dashboard/alerts", { cache: "no-store" }).then(r => r.json()).then(d => {
@@ -2180,18 +2309,25 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
           await store.forceRefresh();
         } catch (e) { /* 网络失败: 本地仍生效, 下次保存/刷新会对齐 */ }
       };
+      const toggleSubagents = async (next) => {
+        if (subsSaving) return;
+        subsDirty.current = true; setSubsSaving(true); setSubsSaveError("");
+        setShowSubs(next);
+        try {
+          await saveVerified("/api-dashboard/config", { showSubagentCapsules: next }, d => d);
+          snapshot = { ...snapshot, config: { ...snapshot.config, showSubagentCapsules: next } }; notify();
+        } catch (e) { setSubsSaveError("保存失败：" + e.message); setShowSubs(!next); }
+        finally { setSubsSaving(false); }
+      };
       const qtLabel = (q) => t("qt." + (q || "auto"));
 
       // v1.1.0: 大肥鱼细项即时生效 + 即时落盘 (滑块/开关都不依赖「保存并生效」按钮)
       const patchWf = (patch) => {
+        Object.keys(patch).forEach(k => wfDirty.current.add(k));
         setWf(prev => ({ ...prev, ...patch }));
         patchWhaleWidget(patch);
-        try {
-          fetchT("/api-dashboard/whale/settings", {
-            method: "PUT", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(patch),
-          }).catch(() => {});
-        } catch (e) { /* 忽略 */ }
+        setWhaleSaveError("");
+        saveWhalePatch(patch).then(() => setWhaleSaveError("")).catch(e => setWhaleSaveError("保存失败：" + e.message));
       };
 
       const tab = (id, label) => react.createElement("button", { type: "button", className: "dshadb_tab" + (section === id ? " dshadb_tab_active" : ""), onClick: () => setSection(id), key: id }, label);
@@ -2218,7 +2354,7 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
         }, t("topup.go")),
       ]);
       const topupSection = react.createElement("div", { className: "dshadb_settings_section", key: "s_topup" }, [
-        react.createElement("div", { key: "hint", style: { fontSize: "10.5px", color: "#9ca0aa", lineHeight: 1.5, margin: "0 2px 10px" } }, t("topup.hint")),
+        react.createElement("div", { key: "hint", style: { fontSize: "10.5px", color: "var(--dshadb-secondary,#9ca0aa)", lineHeight: 1.5, margin: "0 2px 10px" } }, t("topup.hint")),
         ...["国内", "海外"].map((cat) => {
           const list = consoleTargets.filter((x) => (x.category || "") === cat);
           if (list.length === 0) return null;
@@ -2231,6 +2367,15 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
 
       // 基础设置: 阈值 / 币种 / 刷新间隔
       const basicSection = react.createElement("div", { className: "dshadb_settings_section", key: "s_basic" }, [
+        react.createElement("div", { className: "dshadb_settings_row", key: "subagents" }, [
+          react.createElement("div", { className: "dshadb_settings_row_main", key: "text" }, [
+            react.createElement("span", { className: "dshadb_settings_row_title", key: "title" }, "输入框下显示子代理"),
+            react.createElement("span", { className: "dshadb_settings_row_sub", key: "hint" }, "关闭后移到看板的当前会话子代理分区；没有子代理时不显示"),
+          ]),
+          react.createElement(Switch, { checked: showSubs, disabled: subsSaving, onChange: toggleSubagents, key: "switch" }),
+
+        ]),
+        subsSaveError ? react.createElement("p", { role: "alert", className: "dshadb_save_error", key: "subsError" }, subsSaveError) : null,
         react.createElement("div", { className: "dshadb_grid2", key: "thresh" }, [
           react.createElement("div", { key: "safe" }, [
             react.createElement("label", { className: "dshadb_label", key: "l1" }, t("settings.safe")),
@@ -2399,7 +2544,7 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
           react.createElement("button", { type: "button", className: "dshadb_add_btn", onClick: addRelay, key: "addbtn" }, react.createElement(IconPlus, null), t("add.relay")),
         ]),
         relays.length > 0 ? react.createElement("div", { key: "list" }, [
-          react.createElement("div", { style: { fontSize: "11px", fontWeight: "700", color: "#777b84", padding: "4px 2px", margin: "4px 0 6px", display: "flex", alignItems: "center", gap: "6px" }, key: "gsec" }, t("relay")),
+          react.createElement("div", { style: { fontSize: "11px", fontWeight: "700", color: "var(--dshadb-muted,#777b84)", padding: "4px 2px", margin: "4px 0 6px", display: "flex", alignItems: "center", gap: "6px" }, key: "gsec" }, t("relay")),
           relays.map(r => react.createElement("div", { className: "dshadb_card", key: r.id }, [
             react.createElement("span", { className: "dshadb_card_logo", key: "logo" }, renderLogo({platform:"relay"})),
             react.createElement("div", { className: "dshadb_card_info", key: "info" }, [
@@ -2413,7 +2558,7 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
 
       // 自定义模型区块
       const modelSection = react.createElement("div", { className: "dshadb_settings_section", key: "s_models" }, [
-        react.createElement("div", { style: { fontSize: "11px", fontWeight: "700", color: "#777b84", margin: "4px 0 6px", display: "flex", alignItems: "center", gap: "6px" }, key: "hint" }, t("settings.modelHint")),
+        react.createElement("div", { style: { fontSize: "11px", fontWeight: "700", color: "var(--dshadb-muted,#777b84)", margin: "4px 0 6px", display: "flex", alignItems: "center", gap: "6px" }, key: "hint" }, t("settings.modelHint")),
         react.createElement("div", { style: { marginBottom: "8px" }, key: "model_form" }, [
           react.createElement("label", { className: "dshadb_label", key: "m1" }, t("settings.modelName")),
           react.createElement("input", { className: "dshadb_field", value: mform.name, placeholder: "我的模型余额", onChange: (e) => setMform({ ...mform, name: e.target.value }), key: "mi1" }),
@@ -2461,7 +2606,7 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
           react.createElement("button", { type: "button", className: "dshadb_add_btn", onClick: addModel, key: "addbtn2" }, react.createElement(IconPlus, null), t("add.custom")),
         ]),
         models.length > 0 ? react.createElement("div", { key: "mlist" }, [
-          react.createElement("div", { style: { fontSize: "11px", fontWeight: "700", color: "#777b84", padding: "4px 2px", margin: "4px 0 6px", display: "flex", alignItems: "center", gap: "6px" }, key: "gsec2" }, t("custom")),
+          react.createElement("div", { style: { fontSize: "11px", fontWeight: "700", color: "var(--dshadb-muted,#777b84)", padding: "4px 2px", margin: "4px 0 6px", display: "flex", alignItems: "center", gap: "6px" }, key: "gsec2" }, t("custom")),
           models.map(m => react.createElement("div", { className: "dshadb_card", key: m.id }, [
             react.createElement("span", { className: "dshadb_card_logo", key: "logo" }, renderLogo({platform:"relay"})),
             react.createElement("div", { className: "dshadb_card_info", key: "info" }, [
@@ -2516,6 +2661,7 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
         // 细项: 未开启时置灰不可点
         react.createElement("div", { className: whaleOn ? "" : "dshadb_wf_disabled", key: "detail" }, [
           !whaleOn ? react.createElement("div", { className: "dshadb_wf_tip", key: "offtip", style: { marginBottom: "8px" } }, t("whale.offTip")) : null,
+          whaleSaveError ? react.createElement("p", { role: "alert", style: { color: "#e05252" }, key: "saveerror" }, whaleSaveError) : null,
           wfSlider("scale", t("whale.scale"), Math.round(wf.scale * 100) + "%", 0.6, 2.5, 0.05, wf.scale,
             (v) => patchWf({ scale: v })),
           wfSlider("peek", t("whale.peek"), Math.round(wf.peekRatio * 100) + "%", 0.15, 0.9, 0.05, wf.peekRatio,
@@ -2545,7 +2691,7 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
       //    任务还会把 [aria-modal="true"] 里的 [class*="_header"] 搬进 _nav。
       //    （只加 role="dialog" 是安全的：全仓只有 3 处提到 role="dialog"，且唯一条结构规则
       //      `[role="dialog"]:has([data-dsh-market-root]) > nav` 只对插件市场自己的根生效。）
-      const output = react.createElement("div", { className: "dshadb_drawer", role: "dialog", "aria-label": t("settings.title"), style: { "--dshadb-max-h": "86vh" }, onClick: (e) => e.stopPropagation(), key: "drawer" }, [
+      const output = react.createElement("div", { className: "dshadb_drawer dshadb_settings_drawer", role: "dialog", "aria-label": t("settings.title"), style: { "--dshadb-max-h": "86vh" }, onClick: (e) => e.stopPropagation(), key: "drawer" }, [
         react.createElement(SwipeHandle, { onClose: onBack || onClose, key: "handle" }),
         react.createElement("div", { className: "dshadb_header", key: "header" }, [
           react.createElement("div", { style: { display: "flex", alignItems: "center", gap: "10px", flex: "1", minWidth: 0 }, key: "leftwrap" }, [
@@ -2569,20 +2715,20 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
           tabsNode,
           section === "basic" ? basicSection : section === "relays" ? relaySection : section === "whale" ? whaleSection : section === "topup" ? topupSection : modelSection,
           // 大肥鱼页全部即改即存、充值入口页没有配置项 —— 两页都不需要「保存并生效」
-          (section === "whale" || section === "topup") ? null : react.createElement("button", { type: "button", className: "dshadb_add_btn", onClick: save, disabled: saving, key: "save", style: { width: "100%", borderStyle: "solid", background: "#17181c", color: "#fff", borderColor: "#17181c" } }, saving ? t("refreshing") : t("settings.save")),
+          (section === "whale" || section === "topup") ? null : react.createElement("button", { type: "button", className: "dshadb_add_btn", onClick: save, disabled: saving, key: "save", style: { width: "100%", borderStyle: "solid", background: "#4176e6", color: "#fff", borderColor: "#4176e6" } }, saving ? t("refreshing") : t("settings.save")),
           // v0.6.0: 版本与更新区块
-          react.createElement("div", { key: "upd", style: { marginTop: "12px", paddingTop: "10px", borderTop: "1px solid #e7e8ec" } }, [
-            react.createElement("div", { style: { fontSize: "11px", fontWeight: "700", color: "#777b84", marginBottom: "8px" }, key: "upd_t" }, t("update.title")),
-            react.createElement("div", { key: "upd_row", style: { display: "flex", alignItems: "center", gap: "8px", fontSize: "13px", color: "#17181c", fontWeight: "600" } }, [
+          react.createElement("div", { key: "upd", style: { marginTop: "12px", paddingTop: "10px", borderTop: "1px solid var(--dshadb-border,#e7e8ec)" } }, [
+            react.createElement("div", { style: { fontSize: "11px", fontWeight: "700", color: "var(--dshadb-muted,#777b84)", marginBottom: "8px" }, key: "upd_t" }, t("update.title")),
+            react.createElement("div", { key: "upd_row", style: { display: "flex", alignItems: "center", gap: "8px", fontSize: "13px", color: "var(--dshadb-text,#17181c)", fontWeight: "600" } }, [
               react.createElement("span", { key: "upd_v" },
-                t("update.current") + ": v" + (upd.info?.current || "?")),
+                t("update.current") + ": v" + (upd.info?.current || config?.version || "读取中")),
               upd.info?.hasUpdate ? react.createElement("span", { key: "upd_badge", style: { color: "#35b56b", fontSize: "12px", fontWeight: "700" } }, "→ v" + upd.info.remote) : null,
             ]),
             react.createElement("div", { key: "upd_btns", style: { display: "flex", gap: "8px", marginTop: "8px" } }, [
               react.createElement("button", { type: "button", className: "dshadb_add_btn", onClick: () => checkUpdate(true), disabled: upd.phase === "checking" || upd.phase === "installing" || previewUpdateLocked, key: "upd_chk", style: { flex: 1, padding: "8px", fontSize: "12px" } },
                 upd.phase === "checking" ? t("update.checking") : t("update.check")),
-              upd.info?.hasUpdate && !previewUpdateLocked ? react.createElement("button", { type: "button", className: "dshadb_save_btn", onClick: installUpdate, disabled: upd.phase === "installing", key: "upd_go", style: { flex: 1, padding: "8px", fontSize: "12px" } },
-                upd.phase === "installing" ? t("update.installing") : t("update.install") + " v" + upd.info.remote) : null,
+              upd.info?.hasUpdate && !previewUpdateLocked ? react.createElement("button", { type: "button", className: "dshadb_save_btn", onClick: () => setUpdateDetailsOpen(true), disabled: upd.phase === "installing", key: "upd_go", style: { flex: 1, padding: "8px", fontSize: "12px" } },
+                upd.phase === "installing" ? t("update.installing") : t("update.viewDetails")) : null,
             ]),
             // v1.5.0-desktop-preview 系列: 预览版分两种情形, 别一刀切禁掉更新 ——
             //   · **有预览频道**(package.json 的 dsh.updateRef, 例如 preview/desktop): 允许一键更新,
@@ -2608,7 +2754,7 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
                 padding: upd.phase === "done" || upd.phase === "fail" ? "8px 10px" : "0",
                 borderRadius: upd.phase === "done" || upd.phase === "fail" ? "6px" : "0",
                 lineHeight: "1.4"
-              } }, upd.msg) : (upd.info?.hasUpdate ? react.createElement("div", { key: "upd_msg", style: { color: "#777b84", fontSize: "11px" } },
+              } }, upd.msg) : (upd.info?.hasUpdate ? react.createElement("div", { key: "upd_msg", style: { color: "var(--dshadb-muted,#777b84)", fontSize: "11px" } },
                 t("update.available") + " v" + upd.info.remote) : null),
             ]),
           ]),
@@ -2618,10 +2764,13 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
       //   而两层遮罩同为 rgba(0,0,0,0.35) → 叠加后总暗度 1-(0.65)² ≈ 0.58, 打开瞬间背景从 0.35 渐暗到 0.58
       //   (dshadb-fadein .15s), 看上去「又抽了一下」。已知下层已有遮罩时本层不再重复加深 ——
       //   只把背景设为透明, scrim 本身保留(继续拦截点击 / 点空白关闭)。
-      return react.createElement("div", { className: "dshadb_scrim", style: underScrim ? { background: "transparent" } : undefined, onClick: (e) => { if (e.target === e.currentTarget) onClose(); } }, [
+      return overlayToBody(react.createElement("div", { className: "dshadb_scrim", style: underScrim ? { background: "transparent" } : undefined, onClick: (e) => { if (e.target === e.currentTarget) onClose(); } }, [
         react.createElement("div", { className: "dshadb_swipeguard", "aria-hidden": "true", key: "swipeguard" }),
         output,
-      ]);
+        updateDetailsOpen && upd.info?.hasUpdate ? react.createElement(UpdateDetails, {
+          info: upd.info, t, busy: upd.phase === "installing", onClose: () => setUpdateDetailsOpen(false), onInstall: installUpdate, key: "updateDetails"
+        }) : null,
+      ]));
     }
     //#endregion
 
@@ -2629,9 +2778,9 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
     // 移植自 MeteorNOX/DeepSeek-Balance-Whale-Widget (MIT License, Copyright (c) 2026 MeteorNOX)
     // 保留原版全部互动能力: 拖拽 / 四边吸附 / 左吸附镜像 / 按压Q弹 / 音效 / 随机台词 / 汉堡菜单;
     // 去掉的只有余额与消耗显示 (那部分由输入框下方的看板负责)。
-    function Switch({ checked, onChange }) {
+    function Switch({ checked, onChange, disabled }) {
       return react.createElement("button", {
-        type: "button", role: "switch", "aria-checked": !!checked,
+        type: "button", role: "switch", "aria-checked": !!checked, disabled: !!disabled,
         className: "dshadb_switch" + (checked ? " dshadb_switch_on" : ""),
         onClick: () => onChange(!checked), style: { marginLeft: "auto" },
       }, react.createElement("span", { className: "dshadb_switch_knob" }));
@@ -2746,6 +2895,15 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
     var whaleRefs = 0;
     // 最近一次已知的大肥鱼设置缓存 — 会话切换重建时直接用它初始化, 避免先从默认(右侧)闪一下再跳回用户位置
     var lastWhaleSettings = null;
+    const whaleDirtyFields = new Set();
+    let whaleSaveChain = Promise.resolve();
+    function saveWhalePatch(patch) {
+      const task = whaleSaveChain.catch(() => {}).then(async () => {
+        return saveVerified("/api-dashboard/whale/settings", patch, d => d.settings);
+      });
+      whaleSaveChain = task;
+      return task;
+    }
     // 停止互动后多久缩回 / 气泡存活时长 (用户要求: 3 秒)
     var WHALE_IDLE_MS = 3000;
     // 左右「边缘带」占屏宽比例: 松手时中心落在带内才吸附缩回, 中间区域原地不动
@@ -2946,6 +3104,9 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
 
       // ---------- 持久化 ----------
       function saveSoon() {
+        // 拖拽只写位置，不能用挂件旧的全量设置覆盖面板新值。
+        ["left", "top", "side"].forEach(k => whaleDirtyFields.add(k));
+        lastWhaleSettings = { ...st };
         if (saveTimer) clearTimeout(saveTimer);
         saveTimer = setTimeout(function () {
           saveTimer = null;
@@ -2955,10 +3116,7 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
             peekRatio: st.peekRatio, left: st.left, top: st.top, side: st.side,
           };
           try {
-            fetchT("/api-dashboard/whale/settings", {
-              method: "PUT", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(lastWhaleSettings),
-            }).catch(function () {});
+            saveWhalePatch({ left: st.left, top: st.top, side: st.side }).catch(function () {});
           } catch (e) {}
         }, 400);
       }
@@ -3165,6 +3323,8 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
       // ---------- 外部设置接口 ----------
       // 设置面板「大肥鱼」页改动后调用: 立刻应用到当前挂件并落盘
       function applyPatch(patch) {
+        // 先使初始 GET 失效，不能让旧回包覆盖用户已编辑的字段。
+        lastWhaleSettings = { ...st, ...patch };
         var soundTouched = false;
         for (var key in patch) {
           if (!Object.prototype.hasOwnProperty.call(patch, key)) continue;
@@ -3281,12 +3441,8 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
           if (!d || !d.ok || !d.settings) return;
           // 本会话内已拖过/存过位置(缓存非空)时, 不再用服务端旧值覆盖当前落点,
           // 否则重建(新对话)会把用户刚放好的中间/左边又弹回服务端的旧右侧
-          if (!lastWhaleSettings) {
-            for (var key in WHALE_DEFAULTS) {
-              if (d.settings[key] !== undefined && d.settings[key] !== null) st[key] = d.settings[key];
-            }
-            if (d.settings.left !== undefined) st.left = d.settings.left;
-            if (d.settings.top !== undefined) st.top = d.settings.top;
+          for (var key in WHALE_DEFAULTS) {
+            if (!whaleDirtyFields.has(key) && d.settings[key] !== undefined) st[key] = d.settings[key];
           }
           lastWhaleSettings = {
             scale: st.scale, soundOn: st.soundOn, soundSet: st.soundSet, volume: st.volume,
@@ -3304,6 +3460,8 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
     function releaseWhaleWidget() { whaleRefs = Math.max(0, whaleRefs - 1); if (whaleRefs === 0) removeWhaleWidget(); }
     /** 设置面板改动后推给活着的挂件 (未挂载时静默忽略, 值已由端点落盘) */
     function patchWhaleWidget(patch) {
+      Object.keys(patch).forEach(k => whaleDirtyFields.add(k));
+      lastWhaleSettings = { ...(lastWhaleSettings || {}), ...patch };
       if (whaleWidget && whaleWidget.applyPatch) whaleWidget.applyPatch(patch);
     }
     /** v1.4.0: 我们自己的抽屉/面板是否开着 —— 开着就锁住挂件的触摸 (见 setLocked 注释)。
@@ -3474,14 +3632,14 @@ const openSettings = (section) => { setSettingsSection(section || "basic"); setS
           // v1.4.0: 子代理消耗行 —— 有子代理时在状态条**下面换行**追加一行,
           // 按父会话里的创建顺序从左到右排列 (顺序由服务端 subagentCatalog 决定, 这里不排序)。
           // 只计该子代理自身新用量，不含继承历史、兄弟或后代。
-          const subRow = buildSubagentRow(cost);
+          const subRow = config?.showSubagentCapsules !== false ? buildSubagentRow(cost) : null;
 
           return react.createElement("span", { className: "dshadb_barwrap" }, [
             react.createElement("span", { className: "dshadb_barrow", key: "row" }, [
               // v0.5.7: 本会话消耗并入同一个胶囊, 不再裸露在外
               react.createElement(BarReadout, { t, onOpen: openList, onOpenSettings: (sec) => openSettings(typeof sec === "string" ? sec : "basic"), selectedId, onSelect: handleSelect, config, cost: costDisp, provider: curProvider,
               peakValley: !!(cost && cost.peakValley), key: "bar" }),
-              view === "list" ? react.createElement(DashboardDrawer, { isOpen: true, onClose: closeList, t, selectedId, onSelect: handleSelect, onOpenDetail: (id) => { setDetailId(id); setView("detail"); }, onAddRelay: () => openSettings("relays"), onAddCustom: () => openSettings("models"), onOpenSettings: (sec) => openSettings(typeof sec === "string" ? sec : "basic"), config, currentModel,
+              view === "list" ? react.createElement(DashboardDrawer, { isOpen: true, onClose: closeList, t, selectedId, onSelect: handleSelect, onOpenDetail: (id) => { setDetailId(id); setView("detail"); }, onAddRelay: () => openSettings("relays"), onAddCustom: () => openSettings("models"), onOpenSettings: (sec) => openSettings(typeof sec === "string" ? sec : "basic"), config, currentModel, subagentCost: cost,
               today: (cost && cost.todayTokens) ? { tokens: cost.todayTokens, byCurrency: cost.todayByCurrency || {}, byModel: cost.todayByModel || {} } : null,
               key: "drawer" }) : null,
               view === "detail" ? react.createElement(PlatformDetail, { isOpen: true, onClose: closeDetail, platformId: detailId, t, useProjection, config, key: "detail" }) : null,
@@ -3495,7 +3653,10 @@ const openSettings = (section) => { setSettingsSection(section || "basic"); setS
       });
 
       ctx.effect(() => {
-        const onVisibility = () => { if (!document.hidden) refresh(false, true).then(schedule, schedule); };
+        const onVisibility = () => {
+          if (document.hidden) { if (timer !== null) { clearTimeout(timer); timer = null; } return; }
+          if (started && listeners.size > 0) refresh(false, true).then(schedule, schedule);
+        };
         document.addEventListener("visibilitychange", onVisibility);
         return () => document.removeEventListener("visibilitychange", onVisibility);
       }, "dsh-api-dashboard: visibility resume");
@@ -3504,6 +3665,7 @@ const openSettings = (section) => { setSettingsSection(section || "basic"); setS
       // 面板据此收窄并在可视区里重新居中/上移(报告 §2.2 真机实测: 键盘 242px, 盖住面板 26%)。
       // 注册在插件级而不是某个抽屉里: 三个抽屉共用同一个变量, 也免得抽屉开关时反复装卸监听。
       ctx.effect(() => installKeyboardInsetVar(), "dsh-api-dashboard: 软键盘避让");
+      ctx.effect(() => installOverlayEnvironment(), "dsh-api-dashboard: 稳定浮层与宿主主题");
     }
     //#endregion
 

@@ -146,7 +146,7 @@ a('H4b clampRefreshSec 下限 1 / 上限 60', (() => {
   const pkgRoot = path.join(base, 'pkgroot', 'dsh-api-dashboard-main')
   mkdirSync(path.join(pkgRoot, 'src'), { recursive: true })
   mkdirSync(path.join(pkgRoot, 'client'), { recursive: true })
-  writeFileSync(path.join(pkgRoot, 'package.json'), JSON.stringify({ name: 'dsh-api-dashboard', version: '9.9.9' }))
+  writeFileSync(path.join(pkgRoot, 'package.json'), JSON.stringify({ name: 'dsh-api-dashboard', version: '9.9.9', peerDependencies: { '@deepseek-ai/dsh': '^0.1.0-rc.6 || ^0.2.0-rc.2' } }))
   writeFileSync(path.join(pkgRoot, 'src', 'index.js'), '// new')
   writeFileSync(path.join(pkgRoot, 'client', 'client.js'), '// new')
   writeFileSync(path.join(pkgRoot, 'cordis.patch.yml'), '- insert: []\n')
@@ -284,12 +284,12 @@ a('H4b clampRefreshSec 下限 1 / 上限 60', (() => {
     /\.dshadb_barwrap\{[^}]*width:fit-content[^}]*margin:(-\d+px|0) auto( 0)?\}/.test(cli) &&
     !/\.dshadb_barwrap\{[^}]*margin:\d+px auto/.test(cli))
   a('UI 不再有容器化底色/边框', !/\.dshadb_barwrap\{[^}]*border-radius:12px/.test(cli))
-  a('UI 余额条恢复独立药丸（圆角+底色+边框）', /\.dshadb_bar\{display:inline-flex[^}]*border-radius:10px;background:#f5f6f8;border:1px solid #e7e8ec/.test(cli))
+  a('UI 余额条恢复独立药丸（圆角+底色+边框）', /\.dshadb_bar\{display:inline-flex[^}]*border-radius:10px;background:var\(--dshadb-panel/.test(cli))
   a('UI 余额条不再是 flex:1 填充', !/\.dshadb_bar\{[^}]*flex:1 1 auto/.test(cli))
   a('UI 子代理行左右对称内边距', /\.dshadb_subs\{[^}]*margin:3px 0 0 0/.test(cli))
   a('UI 溢出渐隐类有 CSS', /\.dshadb_subs_overflow\{-webkit-mask-image/.test(cli))
   a('UI 溢出时才加渐隐类', /scrollWidth > n\.clientWidth \+ 1/.test(cli))
-  a('UI 暗色余额条有背景', /\.dshadb_bar\{background:#262a33/.test(cli))
+  a('UI 暗色余额条有背景', cli.includes('body[data-ds-dark-theme]') && cli.includes('--dshadb-panel:#202329'))
   a('UI 抽屉/遮罩仍是 fixed（不会被裁）', /\.dshadb_drawer\{position:fixed/.test(cli) && /\.dshadb_scrim\{position:fixed/.test(cli))
   a('UI 结构完整性: barwrap/barrow/subs 类名都在', cli.includes('"dshadb_barwrap"') && cli.includes('"dshadb_barrow"') && cli.includes('"dshadb_subs"'))
 }

@@ -12,7 +12,7 @@ npm 发布走 **Trusted Publishing (OIDC)**，仓库内不存任何 token：
 git tag v1.3.2 && git push origin v1.3.2
 ```
 
-`.github/workflows/publish.yml` 会校验「tag 与 package.json 版本一致」「dependencies 为空」
+`.github/workflows/publish.yml` 会校验「tag 与 package.json 版本一致」「dependencies 为空，semver 由宿主 peer 提供」
 「语法」「全套测试全绿」，全过才发布，并附带 provenance 溯源。
 首次使用需先在 npm 网页把本仓库配成 Trusted Publisher（详见该 workflow 顶部注释）。
 

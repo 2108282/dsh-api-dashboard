@@ -74,7 +74,7 @@ jobs:
             exit 1
           fi
 
-      # 零依赖是本插件的硬约束：引入 runtime 依赖会破坏宿主安装
+      # 保持零 dependencies；semver 作为宿主提供的 optional peer。
       - name: 校验 dependencies 为空
         run: |
           node -e "
@@ -104,10 +104,12 @@ jobs:
         run: |
           mkdir -p /tmp/peerdeps && cd /tmp/peerdeps
           npm init -y > /dev/null
-          npm i --no-fund --no-audit zod@4.5.2 '@deepseek-ai/schemastery@3.18.1'
+          npm i --no-fund --no-audit zod@4.5.2 semver@7.8.5 '@deepseek-ai/schemastery@3.18.1' '@deepseek-ai/dsh-app-boot@0.2.0-rc.2'
           cd "$GITHUB_WORKSPACE"
           mkdir -p node_modules/@deepseek-ai
           ln -sfn /tmp/peerdeps/node_modules/zod node_modules/zod
+          ln -sfn /tmp/peerdeps/node_modules/semver node_modules/semver
+          ln -sfn /tmp/peerdeps/node_modules/@deepseek-ai/dsh-app-boot node_modules/@deepseek-ai/dsh-app-boot
           ln -sfn /tmp/peerdeps/node_modules/@deepseek-ai/schemastery node_modules/@deepseek-ai/schemastery
           node --input-type=module -e "
             console.log('zod        →', await import.meta.resolve('zod'));

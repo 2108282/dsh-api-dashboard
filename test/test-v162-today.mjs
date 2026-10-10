@@ -139,8 +139,8 @@ a('#6 缓存目录不存在时今日花销退化成空对象(不抛)',
   (() => { try { const { view } = run([hdr('glm-5.3'), msg(1, 1, { inputTokens: 1 })]);
     return typeof view.todayByCurrency === 'object' } catch { return false } })())
 // ===== ⑦ 版本 =====
-a('#7 stateVersion 升到 5 (byDay 是新状态字段, 老状态必须重放)',
-  m.makeCostProjection(() => CFG).stateVersion === 5,
+a('#7 stateVersion 升到 6 (own.byDay 新增，老状态必须重放)',
+  m.makeCostProjection(() => CFG).stateVersion === 6,
   String(m.makeCostProjection(() => CFG).stateVersion))
 
 

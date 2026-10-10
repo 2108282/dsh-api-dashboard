@@ -26,3 +26,6 @@ credentials*.yaml
 # Editor
 .idea/
 .vscode/
+
+# DSHA machine-generated install receipts (not project source)
+.dsha-dependencies.json

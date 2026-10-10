@@ -149,7 +149,7 @@ a('#3 onOpenSettings 兼容不带参数调用(状态条齿轮那里就是不带�
   /onOpenSettings: \(sec\) => openSettings\(typeof sec === "string" \? sec : "basic"\)/.test(cli))
 a('#3 抽屉提示有独立 CSS 且深色模式有覆盖',
   /\.dshadb_topup_hint\{display:flex/.test(cli) &&
-  /prefers-color-scheme:dark\)\{[\s\S]*?\.dshadb_topup_hint\{border-top-color/.test(cli))
+  cli.includes('body[data-ds-dark-theme]') && /\.dshadb_topup_hint\{[^}]*var\(--dshadb-divider/.test(cli))
 a('#3 清单由服务端下发(不靠 balances, 无 key / 关了品牌开关的平台也得在)',
   /consoleTargets: PLATFORM_PRESETS\.filter\(p => p\.consoleUrl\)\.map/.test(src))
 a('#3 客户端拉 consoleTargets', /setConsoleTargets\(d\.consoleTargets\)/.test(cli))

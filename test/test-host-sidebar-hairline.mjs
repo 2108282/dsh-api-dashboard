@@ -53,6 +53,6 @@ assert.ok(!source.includes('contain:paint'), 'preview.6 的 contain:paint 试验
 
 // ⑥ 三个抽屉都仍然渲染遮罩（:has(.dshadb_scrim) 的前提）
 const scrims = (source.match(/className: "dshadb_scrim"/g) || []).length;
-assert.equal(scrims, 3, `三个抽屉都应渲染 .dshadb_scrim，实际 ${scrims} 处`);
+assert.equal(scrims, 4, `原三个抽屉与更新确认都应渲染 .dshadb_scrim，实际 ${scrims} 处`);
 
 console.log('侧栏竖线抑制：13 项范围检查通过（真机视觉效果待平板验收）');
