@@ -145,8 +145,8 @@ a('#7 stateVersion 升到 6 (own.byDay 新增，老状态必须重放)',
 
 
 // ===== ⑧ 超限提醒的接线 (客户端 + 配置项) =====
-const cli = fs.readFileSync(path.join(new URL('..', import.meta.url).pathname, 'client/client.js'), 'utf8')
-const src = fs.readFileSync(new URL('../src/index.js', import.meta.url).pathname, 'utf8')
+const cli = fs.readFileSync(path.join(decodeURIComponent(new URL('..', import.meta.url).pathname), 'client/client.js'), 'utf8')
+const src = fs.readFileSync(path.join(decodeURIComponent(new URL('..', import.meta.url).pathname), 'src/index.js'), 'utf8')
 
 a('#8 挂件暴露 warn(能主动弹指定台词, 不是只能随机)',
   /warn: function \(lines\) \{/.test(cli) && /renderLines\(lines \|\| whalePickLines\(st\)\)/.test(cli))

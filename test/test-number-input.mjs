@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs'
 let pass = 0, fail = 0
 const a = (name, cond, extra) => { if (cond) { pass++ } else { fail++; console.log('FAIL ' + name + (extra ? '  ' + extra : '')) } }
 
-const src = readFileSync(new URL('../client/client.js', import.meta.url).pathname, 'utf8')
+const src = readFileSync(decodeURIComponent(new URL('../client/client.js', import.meta.url).pathname), 'utf8')
 
 // 从源码里把两个纯函数原样抠出来跑 —— 不复写一份实现, 否则测的是夹具不是代码。
 const grab = (name) => {

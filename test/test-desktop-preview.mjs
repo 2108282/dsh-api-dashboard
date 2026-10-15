@@ -16,7 +16,7 @@ const { readFileSync } = fs
 let pass = 0, fail = 0
 const a = (name, cond, extra) => { if (cond) { pass++ } else { fail++; console.log('FAIL ' + name + (extra ? '  ' + extra : '')) } }
 
-const ROOT = path.resolve(new URL('..', import.meta.url).pathname)
+const ROOT = path.resolve(decodeURIComponent(new URL('..', import.meta.url).pathname))
 const src = readFileSync(path.join(ROOT, 'src/index.js'), 'utf8')
 const cli = readFileSync(path.join(ROOT, 'client/client.js'), 'utf8')
 const sh = readFileSync(path.join(ROOT, 'install.sh'), 'utf8')

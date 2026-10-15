@@ -13,6 +13,7 @@ try {
   const m = await import('../src/index.js')
   const require = createRequire(import.meta.url)
   const { evaluatePluginCompatibility } = await import('@deepseek-ai/dsh-app-boot')
+    .catch(() => import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js'))
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   assert.equal(evaluatePluginCompatibility(pkg, {}, '0.2.0-rc.2'), undefined)
   assert.equal(evaluatePluginCompatibility(pkg, {}, '0.2.0'), undefined)

@@ -97,7 +97,8 @@ const originalFetch = globalThis.fetch
   const qLines = T.whaleQuotaLines()
   a('大肥鱼气泡生成 3 行结构', Array.isArray(qLines) && qLines.length === 3)
   a('大肥鱼气泡第1行包含当前账号', qLines[0].t.includes('user@example.com'))
-  a('大肥鱼气泡第2行包含5h配额数值55%与重置时间', qLines[1].t.includes('5h') && qLines[1].t.includes('55%') && qLines[1].t.includes('04:16'))
+  const expectedClock = new Date('2026-09-13T04:16:01Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  a('大肥鱼气泡第2行包含5h配额数值55%与重置时间', qLines[1].t.includes('5h') && qLines[1].t.includes('55%') && qLines[1].t.includes(expectedClock))
   a('大肥鱼气泡第3行包含周配额数值88%', qLines[2].t.includes('周') && qLines[2].t.includes('88%'))
 
   globalThis.fetch = originalFetch

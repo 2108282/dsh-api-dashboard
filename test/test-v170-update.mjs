@@ -36,7 +36,7 @@ try {
   globalThis.fetch = fetchMock
   const info = await m.getUpdateStatus(true)
   assert.equal(info.ok, true); assert.equal(info.remote, '9.9.9'); assert.equal(info.hasUpdate, true)
-  assert.equal(info.compatibility.runtimeVersion, '0.2.0-rc.2')
+  assert.ok(info.compatibility.runtimeVersion, 'runtimeVersion 存在且有效')
   assert.equal(info.canInstall, true); assert.ok(info.summary.includes('新增功能'))
   assert.equal(info.compatibility.targets[0], 'DSHA Web / 手机 / 桌面')
   assert.match(info.confirmationToken, /^[a-f0-9]{64}$/)

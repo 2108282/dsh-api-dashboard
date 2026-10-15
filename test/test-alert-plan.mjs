@@ -53,7 +53,7 @@ a('H7 undefined → 0(不猜默认值, 默认值由 Schema/runtimeConfig 给)', 
 // ===== ④ 源码级钉子: 客户端与服务端的字段/文案必须成对存在 =====
 const fs = await import('node:fs')
 const path = await import('node:path')
-const ROOT = path.resolve(new URL('..', import.meta.url).pathname)
+const ROOT = path.resolve(decodeURIComponent(new URL('..', import.meta.url).pathname))
 const cli = fs.readFileSync(path.join(ROOT, 'client/client.js'), 'utf8')
 const srv = fs.readFileSync(path.join(ROOT, 'src/index.js'), 'utf8')
 

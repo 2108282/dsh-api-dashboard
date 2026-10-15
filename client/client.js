@@ -1084,7 +1084,8 @@ body[data-dshadb-theme="dark"],body[data-ds-dark-theme]{--dshadb-panel:#202329;-
     async function syncAgyQuotaClient(balances) {
       try {
         let gemini = balances.find((b) => b.platform === "gemini");
-        if (gemini && gemini.status === "ok" && typeof gemini.total === "number" && gemini.total > 0) {
+        if (!gemini) return balances;
+        if (gemini.status === "ok" && typeof gemini.total === "number" && gemini.total > 0) {
           return balances;
         }
         let res;
@@ -3018,8 +3019,8 @@ body[data-dshadb-theme="dark"],body[data-ds-dark-theme]{--dshadb-panel:#202329;-
             : null,
           tabsNode,
           section === "basic" ? basicSection : section === "relays" ? relaySection : section === "whale" ? whaleSection : section === "topup" ? topupSection : section === "agy" ? agySection : modelSection,
-          // 大肥鱼页、充值入口页与 agy 页都不需要「保存并生效」
-          (section === "whale" || section === "topup" || section === "agy") ? null : react.createElement("button", { type: "button", className: "dshadb_add_btn", onClick: save, disabled: saving, key: "save", style: { width: "100%", borderStyle: "solid", background: "#4176e6", color: "#fff", borderColor: "#4176e6" } }, saving ? t("refreshing") : t("settings.save")),
+          // 大肥鱼页全部即改即存、充值入口页没有配置项、agy 槽位页不需要保存 —— 均不显示「保存并生效」
+          (section === "whale" || section === "topup") ? null : section === "agy" ? null : react.createElement("button", { type: "button", className: "dshadb_add_btn", onClick: save, disabled: saving, key: "save", style: { width: "100%", borderStyle: "solid", background: "#4176e6", color: "#fff", borderColor: "#4176e6" } }, saving ? t("refreshing") : t("settings.save")),
           // v0.6.0: 版本与更新区块
           react.createElement("div", { key: "upd", style: { marginTop: "12px", paddingTop: "10px", borderTop: "1px solid var(--dshadb-border,#e7e8ec)" } }, [
             react.createElement("div", { style: { fontSize: "11px", fontWeight: "700", color: "var(--dshadb-muted,#777b84)", marginBottom: "8px" }, key: "upd_t" }, t("update.title")),
