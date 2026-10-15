@@ -564,6 +564,10 @@ body:has(.dshadb_scrim) [class*="sidebarCol"]{border-right-color:transparent !im
    所以只把我们这一份退回去: 负 margin-top = -(6px) - 2px, 净留 2px 呼吸。
    ⚠️ 想再紧/再松就只调这个值, 别动 28px 的 min-height(那是冷启动 LayoutShift 的钉子)。 */
 .dshadb_barwrap{display:flex;flex-direction:column;align-items:center;gap:0;width:fit-content;max-width:100%;min-width:0;margin:-12px auto 0}
+/* 真机瞬态防抖：冷启动/新会话/统计行渲染延迟时，避免负 margin 导致看板上窜顶进输入框 */
+:has(> .dshadb_barwrap),[class*="_dock"]:has(.dshadb_barwrap){flex-wrap:wrap!important;row-gap:6px!important}
+.dshadb_barwrap{order:10!important;flex:0 0 100%!important;width:100%!important;margin:0 auto}
+[class*="_dock"]:has([data-mobile-nav="stats"], [data-composer-stats], [class*="bOPqQW_"]) .dshadb_barwrap{margin:-10px auto 0!important}
 .dshadb_barrow{display:inline-flex;align-items:center;gap:2px;max-width:100%;min-width:0}
 /* v1.6.5: 窄屏溢出兜底 —— 真机反馈「状态条右侧的本会话消耗只剩个 ~ 被屏幕边缘切住」。
    状态条整条是 nowrap 的 inline-flex 胶囊: 平台名 / 金额 / 峰谷 / 本会话消耗 四段全是
