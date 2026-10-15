@@ -12,9 +12,26 @@ npm 发布走 **Trusted Publishing (OIDC)**，仓库内不存任何 token：
 git tag v1.3.2 && git push origin v1.3.2
 ```
 
-`.github/workflows/publish.yml` 会校验「tag 与 package.json 版本一致」「dependencies 为空」
+`.github/workflows/publish.yml` 会校验「tag 与 package.json 版本一致」「dependencies 为空，semver 由宿主 peer 提供」
 「语法」「全套测试全绿」，全过才发布，并附带 provenance 溯源。
 首次使用需先在 npm 网页把本仓库配成 Trusted Publisher（详见该 workflow 顶部注释）。
+
+### GitHub Release：**手工建**（2026-09-29 起）
+
+CI **只发 npm、不建 Release**。原因：用内置 `GITHUB_TOKEN` 建的 Release 署名固定是
+`github-actions[bot]`（GitHub 的规则，没有开关可改），而发行版要挂在维护者本人名下 ——
+v1.5.0 及更早都是手工建的（署名本人），v1.6.1~v1.6.7 由 CI 自动建，署名全成了 bot。
+
+发版步骤：
+
+1. `git tag v<版本> && git push origin v<版本>`（触发 CI：校验 + 发 npm）
+2. 打开**那次 run 的 Summary 页面** —— workflow 最后一步已经把 CHANGELOG 里该版本的段落
+   整理好放在那里，直接复制
+3. 到 https://github.com/133563825as-ai/dsh-api-dashboard/releases/new 建 Release
+   （选对应 tag，标题 `v<版本>`，正文粘贴第二步的内容）→ 署名即本人
+
+> 想恢复「CI 自动建 Release」只有一条路：在仓库 Secrets 里放一个有 `contents: write` 的 PAT
+> 并把它接成 `GH_TOKEN`。那与「仓库不存任何密钥（npm 侧走 OIDC）」的设计相反，故未采用。
 
 v1.3.3 — **修复「一键更新」按钮无响应**（DSHA webview 拦截 `window.confirm` 导致点击后函数在第一行 return）：去掉确认弹窗，直接执行安装；更新结果改为醒目横幅（成功绿底/失败红底），不再只显示 11px 灰色字；`already up to date` 返回 200 而非 500
 

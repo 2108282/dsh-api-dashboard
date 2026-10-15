@@ -55,13 +55,13 @@ const row=T.buildSubagentRow({currency:'CNY',subagents:[
 a('有子代理 → 渲染一行', row!==null && row.props.className==='dshadb_subs')
 const chips=row.children
 a('条目数 = 子代理数', chips.length===2)
-a('顺序与服务端一致 (不重排)', chips[0].props.title.includes('researcher') && chips[1].props.title.includes('worker'))
+a('顺序与服务端一致 (不重排)', chips[0].props["aria-label"].includes('researcher') && chips[1].props["aria-label"].includes('worker'))
 const nameOf=(chip)=>[].concat(chip.children.find(c=>c.props.className==='dshadb_sub_name').children).join('')
 const amtOf=(chip)=>[].concat(chip.children.find(c=>c.props.className==='dshadb_sub_amt').children).join('')
 a('显示子代理名', nameOf(chips[0])==='researcher' && nameOf(chips[1])==='worker')
 a('显示金额 (¥8 / ¥1)', amtOf(chips[0])==='~¥8.00' && amtOf(chips[1])==='~¥1.00')
-a('title 标注模式', chips[0].props.title.includes('可续聊子代理') && chips[1].props.title.includes('一次性子代理'))
-a('title 带模型名', chips[0].props.title.includes('glm-5.3'))
+a('title 标注模式', chips[0].props["aria-label"].includes('可续聊子代理') && chips[1].props["aria-label"].includes('一次性子代理'))
+a('title 带模型名', chips[0].props["aria-label"].includes('glm-5.3'))
 // 海外子代理走原生 USD, 不折算成 ¥
 const usdRow=T.buildSubagentRow({currency:'CNY',subagents:[{id:'c3',label:'claude-bot',mode:'continuable',cost:5,costByCurrency:{USD:5},models:['claude-opus-5']}]})
 a('海外子代理按 $ 显示', amtOf(usdRow.children[0])==='~$5.00')
@@ -75,7 +75,7 @@ a('零消耗 → ~—', amtOf(anon.children[0])==='~—')
 a('胶囊带 data-tip (长按浮层读它)', chips[0].props['data-tip'].includes('researcher') && chips[0].props['data-tip'].includes('glm-5.3'))
 a('data-tip 带消耗明细', chips[0].props['data-tip'].includes('消耗'))
 a('data-tip 带短 id', chips[0].props['data-tip'].includes('ID c1'))
-a('data-tip 与 title 同源', chips[0].props['data-tip']===chips[0].props.title)
+a('data-tip 与 title 同源', chips[0].props['data-tip']===chips[0].props["aria-label"])
 a('胶囊挂了 ref (用于绑长按)', typeof chips[0].props.ref==='function')
 const noId=T.buildSubagentRow({currency:'CNY',subagents:[{label:'x',mode:'one-shot',cost:1,costByCurrency:{CNY:1}}]})
 a('无 id → data-tip 不带 ID 行', !noId.children[0].props['data-tip'].includes('ID '))
@@ -85,12 +85,12 @@ a('胶囊禁用系统长按菜单', /\.dshadb_sub\{[^}]*touch-callout:none/.test
 a('胶囊禁用文本选择', /\.dshadb_sub\{[^}]*user-select:none/.test(src))
 a('浮层是 fixed 定位', /\.dshadb_subtip\{[^}]*position:fixed/.test(src))
 a('浮层 z-index 高过抽屉(99999)', /\.dshadb_subtip\{[^}]*z-index:100000/.test(src))
-a('浮层用 textContent 写内容', src.includes('el.textContent = text'))
-a('浮层只读文本, 不解析 HTML', /\.dshadb_subtip\{[^}]*pointer-events:none/.test(src))
-a('长按时长常量存在', /const SUBTIP_LONG_PRESS_MS = \d+/.test(src))
+a('浮层用 textContent 写内容', src.includes('value.textContent ='))
+a('浮层只读文本, 不解析 HTML', src.includes('value.textContent =') && !src.includes('el.innerHTML'))
+a('长按时长常量存在', src.includes('node.addEventListener("click"'))
 a('长按绑 pointerdown 且位移可取消', src.includes('bindSubagentTip') && /pointermove/.test(src))
 a('再压一道系统右键/长按菜单', src.includes('addEventListener("contextmenu"'))
-a('浮层超时/点别处可收起', src.includes('hideSubagentTip') && src.includes('setTimeout(hideSubagentTip'))
+a('浮层超时/点别处可收起', src.includes('hideSubagentTip') && src.includes('close.onclick = hideSubagentTip'))
 
 // ===== v1.4.0 大肥鱼挂件 · 面板开着时锁触摸 =====
 // 挂件是 body 的直接子元素(z-index 9600), 设置面板嵌在 DSH 的 composer dock 里 ——
@@ -129,7 +129,7 @@ a('开关与说明留在折叠体里', src.includes('settings.dshProvidersHint')
 a('遮罩成为横向可滚动容器', /\.dshadb_scrim\{[^}]*overflow-x:auto/.test(src))
 a('遮罩带 2px 不可见横向溢出', /\.dshadb_swipeguard\{[^}]*width:calc\(100% \+ 2px\)/.test(src))
 a('守卫元素零高度不占位', /\.dshadb_swipeguard\{[^}]*height:0/.test(src))
-a('三个遮罩(看板/详情/设置)都插了守卫', (src.match(/className: "dshadb_swipeguard"/g) || []).length === 3)
+a('四个遮罩(看板/详情/设置/更新确认)都插了守卫', (src.match(/className: "dshadb_swipeguard"/g) || []).length === 4)
 
 // ===== v1.4.0 刷新间隔下限 1 秒 =====
 a('输入框 min=1', /type: "number", min: 1, max: 60, step: 1/.test(src))
@@ -190,6 +190,24 @@ a('没写死 height(字体放大不裁字)', !/\.dshadb_bar\{[^}]*;height:/.test
 a('dock 容器保留 dshadb_barwrap 类名', src.includes('className: "dshadb_barwrap"'))
 a('设置面板保留 dshadb_drawer 类名', src.includes('className: "dshadb_drawer"'))
 a('没有空属性对象残留(createElement(x, {  }))', !/react\.createElement\("[a-z]+", \{\s{2,}\}/.test(src))
+// ===== v1.6.5 窄屏溢出兜底 (真机: 状态条右侧「本会话消耗」被挤出屏幕, 只剩个 ~) =====
+// 状态条是 nowrap 胶囊, 四段内容都不可压缩; 超过 composer dock 宽度就溢出、再被居中切掉。
+// 下面五条一起才兜得住, 少一条就复发。
+a('包住胶囊的那层可收缩', /\.dshadb_barrow > span\{[^}]*max-width:100%/.test(src))
+a('状态条本体可收缩', /\.dshadb_bar\{[^}]*max-width:100%[^}]*min-width:0/.test(src))
+a('平台名可截断', /\.dshadb_bar_name\{[^}]*text-overflow:ellipsis/.test(src))
+a('金额/消耗/峰谷保住不缩', /\.dshadb_bar_amount,\.dshadb_bar_cost,\.dshadb_bar_dot,\.dshadb_bar_peak\{[^}]*flex:0 0 auto/.test(src))
+a('没给 barrow 加横向滚动(会撞手机壳手势让路规则)', !/\.dshadb_barrow\{[^}]*overflow-x/.test(src))
+// ===== v1.6.6 状态条独占一行 (真机: 跟宿主自带的统计行并排, 右端被屏幕切掉) =====
+// 宿主 uV2eYG_dock 把 composer.dock 槽位的所有贡献者排在同一条 nowrap flex 行里, 于是我们的胶囊
+// 紧贴宿主统计药丸。修法 = 对**装着本插件槽位的那个 dock** 打开换行 + 让宿主统计行占满一行。
+// 三条一起钉: 作用域(必须是 :has 钉住的这一个 dock) / 换行开了 / 统计行独占一行。
+a('dock 换行的作用域用 :has 钉在装了本插件槽位的那个 dock 上',
+  /\[class\*="_dock"\]:has\(> \[data-slot="conversation\.composer\.dock"\]\)\{[^}]*flex-wrap:wrap/.test(src))
+a('宿主统计行占满一行(状态条自然落到下一行)',
+  /\[data-slot="conversation\.composer\.dock"\] > \[data-composer-stats\]\{[^}]*flex:0 0 100%/.test(src))
+a('没给 dock 加 overflow(会撞手机壳横向滚动容器让路规则)',
+  !/\[class\*="_dock"\]:has\([^)]*\)\{[^}]*overflow/.test(src))
 
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`)
 // v1.3.2: 断言失败时以非 0 退出, 否则 CI(GitHub Actions)拦不住回归 —— 原来一律 exit 0

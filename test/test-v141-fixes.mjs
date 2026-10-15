@@ -15,6 +15,34 @@ const src = readFileSync(path.join(ROOT, 'src/index.js'), 'utf8')
 const cli = readFileSync(path.join(ROOT, 'client/client.js'), 'utf8')
 
 // ==========================================================================
+// S-1 打开设置不得瞬删看板 (2026-09-22 维护者反馈「每次点设置都抽搐一下」)
+//   openSettings 原来是 setView("bar") + setSettingsOpen(true) 同帧生效: 从看板点设置时
+//   DashboardDrawer 被当场卸载、SettingsModal 同时挂载, 两块全屏遮罩一换一 (drawer 的
+//   .dshadb_scrim 只有入场动画, 没有出场动画) → 视觉上「啪」一下。改为打开时不收看板、
+//   关闭时再收, 交互结果不变 (关掉设置一样回状态条)。
+// ==========================================================================
+a('S1 openSettings 不再同帧 setView("bar")', !/const openSettings = [^\n]*setView\("bar"\)/.test(cli))
+a('S2 关闭设置时收回看板 (保持关闭后回状态条的原有结果)', /onClose: \(\) => \{ setSettingsOpen\(false\); setView\("bar"\); \}/.test(cli))
+
+// ==========================================================================
+// S-3 打开设置的「余震」 (同日续: 维护者刷新后反馈「还是有点抽搐」)
+//   S1 修掉了同帧卸载/挂载那一下, 但面板本身还有两处位移来源:
+//   ① 两层 .dshadb_scrim 同为 rgba(0,0,0,0.35) —— 下层看板那层保留后, 设置这层一淡入就叠加成
+//      1-(0.65)² ≈ 0.58, 背景在 .15s 内「渐暗一下」。现在下层已有遮罩时本层背景设透明(仍拦截点击)。
+//   ② 设置面板是 position:fixed + bottom:0 + **高度随内容**; 更新结果行原来是条件渲染,
+//      打开时不存在、checkUpdate 回来才插入(约 23px) → 上边缘往上跳。本地请求 <20ms, 常在
+//      滑入动画(.22s)期间就填充, 表现为「边滑边长」。现在改为固定高度槽位。
+// ==========================================================================
+a('S3 下层已有遮罩时设置面板不再叠加第二层 (避免背景 0.35→0.58 的渐暗)',
+  /className: "dshadb_scrim", style: underScrim \? \{ background: "transparent" \}/.test(cli))
+a('S4 调用处如实传 underScrim (view 非 bar 即下层已有遮罩)',
+  /underScrim: view !== "bar"/.test(cli))
+a('S5 更新结果行套进固定高度槽位 (打开面板时不再「长出来」一行导致上边缘跳动)',
+  /key: "upd_slot", style: \{ minHeight: "16px", marginTop: "8px" \}/.test(cli))
+a('S5b 结果行自身不再带 marginTop (高度完全由槽位决定, 槽位/行不会双重占位)',
+  !/key: "upd_msg", style: \{[\s\S]{0,220}?marginTop/.test(cli))
+
+// ==========================================================================
 // H-1 状态文件形状损坏 → apply() 绝不能抛
 // 实测后果: `{"customRelays": 5}` 会让整个 `dsh web` 启动失败(不是插件不显示, 是 GUI 打不开)。
 // 这里用**独立子进程**跑, 因为模块顶层的 DSH_HOME 在 import 时就固化了。
@@ -78,7 +106,19 @@ const cli = readFileSync(path.join(ROOT, 'client/client.js'), 'utf8')
 // ==========================================================================
 {
   a('H4b 加载路径有夹取(源码级)', /NUMBER_FIELDS[\s\S]{0,400}refreshIntervalMs/.test(src))
-  a('H4b clampRefreshSec 下限 1 / 上限 60', (() => {
+  // H-4b 补漏 (2026-09-22): cordis.patch.yml 里曾硬编码 refreshIntervalMs: 300000,
+//   而 sanitizePersistedShape 只夹**状态文件**的值 → config 这条路绕过了所有闸门,
+//   真机表现为「刷新间隔 300 秒」(而 clampRefreshSec 上限明明是 60 秒)。
+{
+  const mm = await import(new URL('../src/index.js', import.meta.url).pathname + '?v=' + Date.now())
+  a('H4b2 clampMs 把 300000 夹到 60000 (config 路径)', mm.clampMs(300000, 1000, 60000, 5000) === 60000)
+  a('H4b3 clampMs 把 -1 抬到下限 1000', mm.clampMs(-1, 1000, 60000, 5000) === 1000)
+  a('H4b4 clampMs 非数字回落 default', mm.clampMs('abc', 1000, 60000, 5000) === 5000 && mm.clampMs(undefined, 1000, 60000, 5000) === 5000)
+}
+a('H4b5 runtimeConfig 对 config 来源也夹取(源码级)', /clampMs\(persisted\.refreshIntervalMs \?\? config\.refreshIntervalMs/.test(src))
+a('H4b6 cordis.patch.yml 不再写死 300000', !readFileSync(path.join(ROOT, 'cordis.patch.yml'), 'utf8').includes('300000'))
+
+a('H4b clampRefreshSec 下限 1 / 上限 60', (() => {
     const m2 = { clampRefreshSec: null }
     return src.includes('Math.min(Math.max(Math.round(Number(v) || 1), 1), 60)')
   })())
@@ -107,7 +147,7 @@ const cli = readFileSync(path.join(ROOT, 'client/client.js'), 'utf8')
   const pkgRoot = path.join(base, 'pkgroot', 'dsh-api-dashboard-main')
   mkdirSync(path.join(pkgRoot, 'src'), { recursive: true })
   mkdirSync(path.join(pkgRoot, 'client'), { recursive: true })
-  writeFileSync(path.join(pkgRoot, 'package.json'), JSON.stringify({ name: 'dsh-api-dashboard', version: '9.9.9' }))
+  writeFileSync(path.join(pkgRoot, 'package.json'), JSON.stringify({ name: 'dsh-api-dashboard', version: '9.9.9', peerDependencies: { '@deepseek-ai/dsh': '^0.1.0-rc.6 || ^0.2.0-rc.2' } }))
   writeFileSync(path.join(pkgRoot, 'src', 'index.js'), '// new')
   writeFileSync(path.join(pkgRoot, 'client', 'client.js'), '// new')
   writeFileSync(path.join(pkgRoot, 'cordis.patch.yml'), '- insert: []\n')
@@ -143,12 +183,31 @@ const cli = readFileSync(path.join(ROOT, 'client/client.js'), 'utf8')
 // ==========================================================================
 {
   const gateCount = (src.match(/if \(!allowRequest\(req, res\)\) return/g) || []).length
-  a('H3 全部路由过闸门', gateCount === 12, 'got ' + gateCount)
+  // v1.4.6: 11 → 12 —— 新增 /api-dashboard/alerts(告警通道状态), 同样带闸门
+  // v1.6.0: 12 → 13 —— 新增 /api-dashboard/open(打开开放平台/充值页), 同样带闸门
+  // v1.6.8: 13 → 14 —— 新增 /api-dashboard/alerts/test(发送测试提醒), 同样带闸门
+  // v1.7.0-agy: 14 → 15 —— 包含 /api-dashboard/agy/accounts, 同样带闸门
+  a('H3 15 个路由全部过闸门', gateCount === 15, 'got ' + gateCount)
   a('H3 用 connection.requestRejection（与 dsh-web-mobile 同一个闸门）', /requestRejection\(req\)/.test(src))
   // 只看代码行, 注释里提到这个坑不算（第一版断言就栽在这: 注释里写了这句, 断言直接假红）
   const codeOnly = src.split('\n').filter((l) => { const t = l.trim(); return !t.startsWith('*') && !t.startsWith('//') && !t.startsWith('/*') }).join('\n')
   a('H3 不再用取不到的 ctx.get 取 connection 服务', !/ctx\.get\('connection'\)/.test(codeOnly))
   a('H3 通过嵌套 inject 拿服务', /ctx\.inject\(\['connection'\]/.test(src))
+
+  // v1.6.0: /api-dashboard/open（「去充值」）—— 安全属性: 只认平台键, 不认任意 URL。
+  // 一旦接受客户端传 url, 这个端点就是现成的开放重定向跳板。
+  const openStart = src.indexOf("path: '/api-dashboard/open'")
+  const openBlock = openStart < 0 ? '' : src.slice(openStart, src.indexOf("dsh-api-dashboard: open route", openStart))
+  a('H3 open 路由存在且过闸门', openBlock.length > 0 && /if \(!allowRequest\(req, res\)\) return/.test(openBlock))
+  a('H3 open 路由只按平台键查表(不接受客户端传 URL)',
+    /PLATFORM_PRESETS\.find\(p => p\.id === id\)/.test(openBlock) && !/JSON\.parse\(body \|\| '\{\}'\)\.url/.test(openBlock))
+  a('H3 open 地址只来自预设表的 consoleUrl(单一出处)',
+    /const url = preset\.consoleUrl/.test(openBlock))
+  a('H3 open 只收 POST(不做成 GET 直链, 免得被 <img>/预取打中)', /req\.method !== 'POST'/.test(openBlock))
+  a('H3 open 未知平台直接 400, 不带着任意串去查表',
+    /if \(!preset\) return sendJson\(res, 400, \{ ok: false, error: 'unknown-platform' \}\)/.test(openBlock))
+  a('H3 open 桥调不通时回退给客户端的地址仍是服务端查表得来',
+    /via: 'browser', url/.test(openBlock))
 }
 
 // ==========================================================================
@@ -158,7 +217,11 @@ const cli = readFileSync(path.join(ROOT, 'client/client.js'), 'utf8')
   a('C1 save() 不再夹到 5 秒', !/\|\| 5, 5\)/.test(cli))
   a('C1 save() 下限是 1 秒', /Number\(refreshSec\) \|\| 1, 1/.test(cli))
   a('C1 输入框 min=1', /min: 1, max: 60, step: 1/.test(cli))
-  a('C1 onChange 下限是 1 秒', /Number\(e\.target\.value\) \|\| 1, 1/.test(cli))
+  a('C1 onChange 下限是 1 秒', /Number\(e\.target\.value\) \|\| 1, 1/.test(cli) || /setRefreshSec\(settleNumber\(e\.target\.value, 1, 60, 5\)\)/.test(cli))
+  // v1.6.9: 输入期的 onChange **不许**再当场夹取 —— Number("")===0 会把"删空"立刻回填成 1,
+  // 旧数字于是删不掉(真机体验: 得先写新数字再删旧的)。夹取改在失焦/保存时做, 下限仍是 1。
+  a('C1 输入期 onChange 不夹取(只留数字、允许空串)', /onChange: \(e\) => setRefreshSec\(numberDraft\(e\.target\.value, 3\)\)/.test(cli))
+  a('C1 失焦时夹取, 下限仍是 1 秒', /onBlur: \(e\) => setRefreshSec\(settleNumber\(e\.target\.value, 1, 60, 5\)\)/.test(cli))
   a('C1 服务端 clampRefreshSec 是 1~60', /Math\.min\(Math\.max\(Math\.round\(Number\(v\) \|\| 1\), 1\), 60\)/.test(src))
 }
 
@@ -206,7 +269,9 @@ const cli = readFileSync(path.join(ROOT, 'client/client.js'), 'utf8')
   a('A 载入时做形状校验', /relayEndpointHints\.clear\(\)/.test(src) && /typeof v === 'string' && v\.length <= 32/.test(src))
   a('A 命中端点排到候选最前', /candidates\.unshift\(candidates\.splice\(idx, 1\)\[0\]\)/.test(src))
   a('A 命中后落盘（仅在变化时）', /if \(relayEndpointHints\.get\(id\) !== cand\.type\)/.test(src) && /relayEndpoints: Object\.fromEntries/.test(src))
-  a('A 的持久化字段进消毒白名单', /OBJECT_FIELDS = \['whaleSettings', 'prices', 'relayEndpoints'\]/.test(src))
+  a('A 的持久化字段进消毒白名单', /OBJECT_FIELDS = \['whaleSettings', 'prices', 'relayEndpoints'/.test(src))
+  // v1.6.8: 告警状态也持久化(重启不再重新轰炸), 同样必须登记进消毒表 —— 否则状态文件形状跑偏时 apply() 会抛
+  a('告警状态的持久化字段同样进消毒白名单', /OBJECT_FIELDS = \[[^\]]*'alertState'/.test(src))
   a('A 只影响顺序（候选全表仍会试）', /只做\*\*排序提示\*\*/.test(src))
 }
 
@@ -214,14 +279,19 @@ const cli = readFileSync(path.join(ROOT, 'client/client.js'), 'utf8')
 // UI v1.4.1（按维护者反馈定稿）：余额条恢复独立药丸 + 整块水平居中
 // ==========================================================================
 {
-  a('UI 整块水平居中（fit-content + margin auto）', /\.dshadb_barwrap\{display:flex;flex-direction:column;align-items:center;gap:0;width:fit-content;max-width:100%;min-width:0;margin:0 auto\}/.test(cli))
+  // v1.6.4: 上边距从 0 改成 -8px（收紧与 DSH 用量统计行之间的空白, 维护者截图反馈）。
+  // 这里继续钉两件事: ①仍是 fit-content 且**水平**居中(margin 的左右必须是 auto);
+  // ②上边距只允许是收紧用的负值, 不许变成正数又把空白加回来。
+  a('UI 整块水平居中（fit-content + margin 左右 auto）',
+    /\.dshadb_barwrap\{[^}]*width:fit-content[^}]*margin:(-\d+px|0) auto( 0)?\}/.test(cli) &&
+    !/\.dshadb_barwrap\{[^}]*margin:\d+px auto/.test(cli))
   a('UI 不再有容器化底色/边框', !/\.dshadb_barwrap\{[^}]*border-radius:12px/.test(cli))
-  a('UI 余额条恢复独立药丸（圆角+底色+边框）', /\.dshadb_bar\{display:inline-flex[^}]*border-radius:10px;background:#f5f6f8;border:1px solid #e7e8ec/.test(cli))
+  a('UI 余额条恢复独立药丸（圆角+底色+边框）', /\.dshadb_bar\{display:inline-flex[^}]*border-radius:10px;background:var\(--dshadb-panel/.test(cli))
   a('UI 余额条不再是 flex:1 填充', !/\.dshadb_bar\{[^}]*flex:1 1 auto/.test(cli))
   a('UI 子代理行左右对称内边距', /\.dshadb_subs\{[^}]*margin:3px 0 0 0/.test(cli))
   a('UI 溢出渐隐类有 CSS', /\.dshadb_subs_overflow\{-webkit-mask-image/.test(cli))
   a('UI 溢出时才加渐隐类', /scrollWidth > n\.clientWidth \+ 1/.test(cli))
-  a('UI 暗色余额条有背景', /\.dshadb_bar\{background:#262a33/.test(cli))
+  a('UI 暗色余额条有背景', cli.includes('body[data-ds-dark-theme]') && cli.includes('--dshadb-panel:#202329'))
   a('UI 抽屉/遮罩仍是 fixed（不会被裁）', /\.dshadb_drawer\{position:fixed/.test(cli) && /\.dshadb_scrim\{position:fixed/.test(cli))
   a('UI 结构完整性: barwrap/barrow/subs 类名都在', cli.includes('"dshadb_barwrap"') && cli.includes('"dshadb_barrow"') && cli.includes('"dshadb_subs"'))
 }

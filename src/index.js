@@ -70,9 +70,7 @@ export const name = 'dsh-api-dashboard'
 // ============================================================
 const REPO_OWNER = '133563825as-ai'
 const REPO_NAME = 'dsh-api-dashboard'
-const REPO_BRANCH = 'main'
-const MANIFEST_API = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/package.json?ref=${REPO_BRANCH}`
-const TARBALL_URL = `https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/refs/heads/${REPO_BRANCH}`
+// 更新元信息来源由正式 Release / 显式预览频道决定，见 fetchRemoteUpdate。
 
 /** 插件运行实体的安装根目录 (src/index.js 上两级; ESM 默认按 realpath 加载) */
 /**
@@ -111,29 +109,177 @@ const readVersionAt = (dir) => {
   } catch { return null }
 }
 
-/** 轻量 semver 比较: a>b 返回 1, a<b 返回 -1, 相等返回 0 (忽略预发布后缀) */
+/**
+ * v1.5.0-desktop-preview 系列: 预发行(预览版)标识。
+ * 判定只看版本号本身 —— semver 预发布后缀(`1.5.0-desktop-preview.4` 里 `-` 之后那一段)
+ * 就是"这不是正式版"的唯一事实来源, 不额外加配置项(加配置项 = 两处真相, 迟早漂移)。
+ * 用途: ① 下发给客户端, 前端据此显示「预览版」横幅; ② 配合 UPDATE_REF 决定能不能自更新。
+ */
+const PLUGIN_VERSION = readVersionAt(SELF_ROOT) || '0.0.0'
+const IS_PREVIEW = PLUGIN_VERSION.includes('-')
+
+/**
+ * 更新频道 (v1.5.0-desktop-preview.4)。
+ *
+ * 需求: 预览版**要能在预览频道内更新自己**(否则每发一版预览都得让用户重跑 install.sh),
+ * 但**绝不能被 main 上的正式版覆盖**(否则桌面布局会无声消失、用户莫名回退)。
+ * 这两个要求合起来只有一种干净做法: 频道 = 「这份代码自己是从哪个 ref 装来的」。
+ *
+ * 它写在 **package.json 的 `dsh.updateRef`** 里, 跟着 tarball 一起走 ——
+ * 不用状态文件(用户手动装、或换机器时状态文件可能不在), 也不用去猜版本号命名规则
+ * (`1.5.0-desktop-preview.4` 与分支名 `preview/desktop` 之间没有可推导关系)。
+ * 正式版没有这个字段 → 默认 main, 与 v1.4.2 行为完全一致。
+ */
+export const UPDATE_REF = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(join(SELF_ROOT, 'package.json'), 'utf8'))
+    const ref = pkg?.dsh?.updateRef
+    if (typeof ref !== 'string') return 'main'
+    // 这个值会被拼进 URL 和 codeload 路径, 必须严格白名单: 只允许普通 ref 字符, 且不许出现 `..`
+    return /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/.test(ref) && !ref.includes('..') ? ref : 'main'
+  } catch { return 'main' }
+})()
+/** 预览频道 = 版本号带预发布后缀 **且** 频道不是 main —— 只有这种情况才允许自更新 */
+export const PREVIEW_CHANNEL = IS_PREVIEW && UPDATE_REF !== 'main'
+
+/**
+ * semver 比较: a>b 返回 1, a<b 返回 -1, 相等返回 0。
+ *
+ * ⚠️ v1.5.0-desktop-preview.4 起**带预发布后缀的优先级**(之前是直接 `split('-')[0]`,
+ * 于是 `…-preview.3` 与 `…-preview.2` 比出来是 0 → 预览频道里永远显示「已是最新」,
+ * 这正是「预览版没法更新到新预览版」的第二半原因)。规则同 semver 2.0.0 §11:
+ *   1.5.0-preview.2 < 1.5.0-preview.3 < 1.5.0-preview.10 < 1.5.0
+ *   数字标识符按数值比, 字母数字按字典序, 数字 < 字母数字, 短的那串更小。
+ * 解析不出来的(缺失段)按 0 处理, 与旧实现一致, 免得对垃圾输入产生新的行为差异。
+ */
 export function semverCompare(a, b) {
-  const pa = String(a).split('-')[0].split('.').map(Number)
-  const pb = String(b).split('-')[0].split('.').map(Number)
+  const parse = (v) => {
+    // v1.5.0-desktop-preview.5 (报告 §2.7): 剥掉前导 `v`。
+    // semver.valid('v1.5.0') 为真, 而本函数原正则 /^(\d+)\.(\d+)\.(\d+)/ 会把 'v1.5.0' 当成 0.0.0 ——
+    // 当前不可达(远端版本取自 package.json.version, 不带 v), 但本仓库的 release tag 是带 v 的
+    // (App 侧更新器就专门做了 removeprefix('v'))。将来若有人把 tag 名喂进来, 会静默判成"没有更新"。
+    // 只认小写 v: 与 semver 包本身一致(它的正则就是 ^v?...), 大写 V 仍按非法处理。
+    const m = String(v ?? '').trim().replace(/^v/, '').match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/)
+    if (!m) return null
+    return { main: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split('.') : null }
+  }
+  const na = parse(a), nb = parse(b)
+  const pa = na ? na.main : []
+  const pb = nb ? nb.main : []
   for (let i = 0; i < 3; i++) {
     const x = Number.isFinite(pa[i]) ? pa[i] : 0
     const y = Number.isFinite(pb[i]) ? pb[i] : 0
     if (x !== y) return x > y ? 1 : -1
   }
+  const xa = na ? na.pre : null
+  const xb = nb ? nb.pre : null
+  if (!xa && !xb) return 0
+  if (!xa) return 1    // 有预发布后缀 < 同版本号无后缀
+  if (!xb) return -1
+  const n = Math.max(xa.length, xb.length)
+  for (let i = 0; i < n; i++) {
+    const x = xa[i], y = xb[i]
+    if (x === undefined) return -1
+    if (y === undefined) return 1
+    const xn = /^\d+$/.test(x), yn = /^\d+$/.test(y)
+    if (xn && yn) {
+      const d = Number(x) - Number(y)
+      if (d !== 0) return d > 0 ? 1 : -1
+      continue
+    }
+    if (xn !== yn) return xn ? -1 : 1   // 数字标识符 < 字母数字标识符
+    if (x !== y) return x > y ? 1 : -1
+  }
   return 0
 }
 
-/** 经 api.github.com Contents API 读取远端 main 分支的 package.json version */
-async function fetchRemoteVersion(timeoutMs = 8000) {
-  const res = await fetch(MANIFEST_API, {
+// v1.7.0: 正式频道只跟已发布 Release；预览频道仍跟自己的 ref。
+const semverMod = await resolvePeer('semver').catch(() => null)
+// 旧宿主若缺 semver，只关闭更新能力，不能把整个看板启动拖垮。
+const semver = semverMod ? (semverMod.default ?? semverMod)
+  : { valid: () => null, validRange: () => null, satisfies: () => false, eq: () => false, prerelease: () => null }
+const { createHash } = await import('node:crypto')
+const API_ROOT = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}`
+const updateError = (code, message = code) => Object.assign(new Error(message), { code })
+const plainText = (value, max) => typeof value === 'string' ? value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '').slice(0, max) : ''
+const manifestDigest = (manifest) => {
+  const stable = (v) => Array.isArray(v) ? v.map(stable) : v && typeof v === 'object'
+    ? Object.fromEntries(Object.keys(v).sort().map(k => [k, stable(v[k])])) : v
+  return createHash('sha256').update(JSON.stringify(stable(manifest))).digest('hex')
+}
+
+/** 只读宿主版本，拿不到不猜：未知状态禁止自更新。 */
+async function runtimeDshVersion() {
+  try {
+    const host = await resolvePeer('@deepseek-ai/dsh-app-boot')
+    const version = host.getDshRuntimeVersion?.()
+    if (semver.valid(version)) return version
+  } catch { /* 旧宿主没有这个导出，使用其已安装 manifest */ }
+  for (const spec of ['@deepseek-ai/dsh-client-connection/package.json', '@deepseek-ai/dsh/package.json']) {
+    try {
+      const pkg = await resolvePeer(spec)
+      const version = (pkg.default ?? pkg).version
+      if (semver.valid(version)) return version
+    } catch { /* 下一个 */ }
+  }
+  return null
+}
+
+/** 与宿主准入一致：所有 DSH peers 均须满足，含 prerelease；没有声明不能冒充兼容。 */
+export function evaluateUpdateCompatibility(manifest, runtimeVersion) {
+  const requirements = []
+  let malformed = false
+  const add = (name, range) => {
+    if (typeof range !== 'string' || !semver.validRange(range)) malformed = true
+    requirements.push({ name, range: typeof range === 'string' ? range.slice(0, 300) : '' })
+  }
+  const peers = manifest?.peerDependencies
+  if (peers !== undefined && (!peers || typeof peers !== 'object' || Array.isArray(peers))) malformed = true
+  for (const [name, range] of Object.entries(peers && typeof peers === 'object' ? peers : {})) {
+    if (name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')) add(name, range)
+  }
+  if (manifest?.engines?.dsh !== undefined) add('engines.dsh', manifest.engines.dsh)
+  const targets = Array.isArray(manifest?.dsh?.update?.targets)
+    ? manifest.dsh.update.targets.filter(x => typeof x === 'string').slice(0, 6).map(x => plainText(x, 160)) : []
+  if (!semver.valid(runtimeVersion) || requirements.length === 0 || malformed) {
+    return { status: 'unknown', runtimeVersion: semver.valid(runtimeVersion) ? runtimeVersion : null, requirements, targets,
+      reason: malformed ? 'invalid-requirements' : requirements.length === 0 ? 'missing-requirements' : 'unknown-runtime' }
+  }
+  const mismatches = requirements.filter(r => !semver.satisfies(runtimeVersion, r.range, { includePrerelease: true }))
+  return { status: mismatches.length ? 'incompatible' : 'compatible', runtimeVersion, requirements, targets,
+    reason: mismatches.length ? 'runtime-mismatch' : null, mismatches }
+}
+
+async function githubJson(url, timeoutMs) {
+  const res = await fetch(url, {
     headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'dsh-api-dashboard-updater' },
     signal: AbortSignal.timeout(timeoutMs),
   })
   if (!res.ok) throw new Error(`GitHub API ${res.status}`)
-  const meta = await res.json()
-  const content = Buffer.from(meta.content ?? '', 'base64').toString('utf8')
-  const parsed = JSON.parse(content)
-  return typeof parsed.version === 'string' ? parsed.version : null
+  return res.json()
+}
+
+async function fetchRemoteUpdate(timeoutMs = 8000) {
+  let ref = UPDATE_REF, release = null
+  if (!PREVIEW_CHANNEL) {
+    release = await githubJson(API_ROOT + '/releases/latest', timeoutMs)
+    if (release.draft || release.prerelease || typeof release.tag_name !== 'string'
+        || !semver.valid(release.tag_name) || semver.prerelease(release.tag_name)) throw updateError('invalid-release')
+    ref = release.tag_name
+  }
+  const meta = await githubJson(API_ROOT + '/contents/package.json?ref=' + encodeURIComponent(ref), timeoutMs)
+  const manifest = JSON.parse(Buffer.from(meta.content ?? '', 'base64').toString('utf8'))
+  if (manifest.name !== name || !semver.valid(manifest.version)) throw updateError('invalid-manifest')
+  if (release && !semver.eq(release.tag_name, manifest.version)) throw updateError('release-version-mismatch')
+  const compatibility = evaluateUpdateCompatibility(manifest, await runtimeDshVersion())
+  return {
+    manifest, ref, compatibility,
+    summary: plainText(release?.body || manifest?.dsh?.update?.summary || manifest.description, 2400),
+    publishedAt: plainText(release?.published_at, 40),
+    releaseUrl: release ? `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/tag/${encodeURIComponent(ref)}` : null,
+    tarballUrl: `https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/${PREVIEW_CHANNEL ? 'refs/heads/' : 'refs/tags/'}${encodeURIComponent(ref)}`,
+    confirmationToken: manifestDigest({ manifest, ref, runtimeVersion: compatibility.runtimeVersion }),
+  }
 }
 
 /**
@@ -146,10 +292,23 @@ async function fetchRemoteVersion(timeoutMs = 8000) {
  * @param {string} [opts.localTarball] 测试注入口: 使用本地 tarball 代替 codeload 下载
  * @returns {{installed:string, targets:string[], backup:string}}
  */
-export async function applyUpdate({ targets = null, timeoutMs = 30000, remoteVersion = null, localTarball = null } = {}) {
+let updateInstalling = false
+export async function applyUpdate(options = {}) {
+  if (updateInstalling) throw updateError('update-busy')
+  updateInstalling = true
+  try { return await applyUpdateInternal(options) } finally { updateInstalling = false }
+}
+
+async function applyUpdateInternal({ targets = null, timeoutMs = 30000, remoteVersion = null, localTarball = null, expectedVersion = null, confirmationToken = null } = {}) {
   const currentVersion = readVersionAt(SELF_ROOT)
-  const wantVersion = remoteVersion !== null ? remoteVersion : await fetchRemoteVersion(timeoutMs).catch(() => null)
-  if (!wantVersion) throw new Error('remote version unavailable')
+  // 本地归档注入仅给测试；HTTP 路由不能接受路径或任意下载地址。
+  const remote = localTarball && remoteVersion ? null : await fetchRemoteUpdate(timeoutMs)
+  const wantVersion = remote?.manifest.version ?? remoteVersion
+  if (!wantVersion || !semver.valid(wantVersion)) throw new Error('remote version unavailable')
+  if (remote) {
+    if (expectedVersion !== wantVersion || confirmationToken !== remote.confirmationToken) throw updateError('update-changed')
+    if (remote.compatibility.status !== 'compatible') throw updateError('update-' + remote.compatibility.status)
+  }
   if (currentVersion && semverCompare(wantVersion, currentVersion) <= 0) {
     throw new Error(`already up to date (${currentVersion})`)
   }
@@ -184,6 +343,8 @@ export async function applyUpdate({ targets = null, timeoutMs = 30000, remoteVer
       throw new Error(`refusing to update a symbolic-link target: ${dir} (use its real path instead)`)
     }
   }
+  // 报告 §2.6: 与宿主插件管理器抢同一个目录时的互斥 —— **尽力而为**, 见 assertHostLockFree 的说明。
+  assertHostLockFree()
 
   // 1) 下载 tarball 到临时文件
   const tmpBase = join(tmpdir(), `dshadb-update-${Date.now()}`)
@@ -196,7 +357,7 @@ export async function applyUpdate({ targets = null, timeoutMs = 30000, remoteVer
     if (localTarball) {
       cpSync(localTarball, tgzPath)
     } else {
-      const res = await fetch(TARBALL_URL, { signal: AbortSignal.timeout(timeoutMs) })
+      const res = await fetch(remote.tarballUrl, { signal: AbortSignal.timeout(timeoutMs) })
       if (!res.ok) throw new Error(`download ${res.status}`)
       writeFileSync(tgzPath, Buffer.from(await res.arrayBuffer()))
     }
@@ -205,9 +366,27 @@ export async function applyUpdate({ targets = null, timeoutMs = 30000, remoteVer
     execFileSync('tar', ['xzf', tgzPath, '-C', extractDir, '--strip-components=1'], { timeout: 20000 })
     // 3) 校验: 版本号匹配预期 + 关键文件齐全 + 包名一致 (装坏了宁可拒绝, 保住回滚机会)
     if (readVersionAt(extractDir) !== wantVersion) throw new Error('extracted version mismatch')
-    let extractedName = null
-    try { extractedName = JSON.parse(readFileSync(join(extractDir, 'package.json'), 'utf8')).name } catch { /* 忽略 */ }
-    if (extractedName !== 'dsh-api-dashboard') throw new Error('extracted package name mismatch')
+    const extractedManifest = JSON.parse(readFileSync(join(extractDir, 'package.json'), 'utf8'))
+    if (extractedManifest.name !== 'dsh-api-dashboard') throw new Error('extracted package name mismatch')
+    const extractedCompatibility = evaluateUpdateCompatibility(extractedManifest, await runtimeDshVersion())
+    if (extractedCompatibility.status !== 'compatible') throw updateError('update-' + extractedCompatibility.status)
+    if (remote && manifestDigest(extractedManifest) !== manifestDigest(remote.manifest)) throw updateError('update-changed')
+    // 原地更新不会安装新增依赖：必须确认现有依赖能满足目标声明。
+    for (const [dependency, range] of Object.entries(extractedManifest.dependencies ?? {})) {
+      let installedVersion = null
+      try {
+        const dependencyPkg = await resolvePeer(dependency + '/package.json')
+        installedVersion = (dependencyPkg.default ?? dependencyPkg).version
+      } catch { /* 未安装或无法核验 → 交给宿主管理器安装 */ }
+      if (!semver.valid(installedVersion) || !semver.validRange(range)
+          || !semver.satisfies(installedVersion, range, { includePrerelease: true })) throw updateError('update-dependencies')
+    }
+    for (const rel of ['src/index.js', 'client/client.js']) {
+      execFileSync(process.execPath, ['--check', join(extractDir, rel)], { timeout: 10000, stdio: 'ignore' })
+    }
+    // 提交前重新检查；这是尽力而为的宿主锁探测，不宣称持锁互斥。
+    assertHostLockFree()
+    if (readVersionAt(SELF_ROOT) !== currentVersion) throw updateError('update-changed')
     for (const rel of ['src/index.js', 'client/client.js', 'cordis.patch.yml']) {
       if (!existsSync(join(extractDir, rel))) throw new Error(`missing file after extract: ${rel}`)
     }
@@ -253,6 +432,47 @@ function realPathSafe(p) {
   try { return realpathSync(p) } catch { return null }
 }
 
+/**
+ * 宿主插件管理器的互斥锁文件路径。
+ * 宿主(DSHA 的 plugin-manager / startup-recovery / register-builtin)所有「插件清单写入」都走
+ * register-builtin-plugins.py 的 operation_lock() —— 那把锁是 Python 的
+ * `fcntl.flock(<数据根>/.dsha-data.lock)`, 而数据根是 DSH_HOME 的**父目录**
+ * (源码注释: "锁放在 .dsh 外, 恢复整个 .dsh 时不会换掉正在使用的锁 inode")。
+ * @returns {string}
+ */
+function hostLockPath() {
+  const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
+  return join(dirname(dshHome), '.dsha-data.lock')
+}
+
+/**
+ * 交换前探一次宿主锁, 探测到被占就中止 —— 报告 §2.6「两套更新器没有互斥」。
+ *
+ * ⚠️ 这是**尽力而为**, 不是真互斥, 别把它当锁用:
+ *   · Node 没有 flock API(只有 fs 的句柄, 没有 flock), 插件**无法持有**宿主那把 fcntl 锁 ——
+ *     报告建议的"复用宿主锁"在纯 Node 里做不到, 除非 spawn 一个长期持有锁的子进程。
+ *   · 所以只能"探一次": 把窗口从**整个交换过程**(下载 + 解压 + 备份 + 删旧 + 拷新, 数秒)
+ *     缩到"探测到动手"之间的毫秒级。真撞上了仍然可能互相踩。
+ *   · 反向的误报也存在: 宿主保存"版本检查结果"时也会短暂持锁, 那一刻点更新会被拒。
+ *     这种误报是可接受的(提示用户稍后重试), 比目录被写坏好。
+ * 探测用 flock(1): `flock -n <file> true` → exit 0 = 空闲, exit 1 = 被占。
+ * flock 不存在 / 锁文件不存在(非 DSHA 环境) → 直接放行, 绝不因为探测失败挡住更新。
+ * @param {string} [lockPath] 测试注入口
+ */
+export function assertHostLockFree(lockPath = null) {
+  if (process.platform === 'win32') return
+  const file = lockPath || hostLockPath()
+  if (!existsSync(file)) return
+  try {
+    execFileSync('flock', ['-n', file, 'true'], { timeout: 3000, stdio: 'ignore' })
+  } catch (err) {
+    // 只有"锁被别人占着"(exit 1)才拦截; ENOENT(没有 flock 命令)/超时/其它一律放行
+    if (err && err.status === 1) {
+      throw new Error('宿主的插件管理器正在操作(清单锁被占用), 请稍后重试')
+    }
+  }
+}
+
 /** 安全列目录: 不存在/不可读返回空数组 */
 function readdirSafe(dir) {
   try { return statSync(dir).isDirectory() ? readdirSync(dir) : [] } catch { return [] }
@@ -262,14 +482,18 @@ function readdirSafe(dir) {
 let updateCache = { checkedAt: 0, result: null }
 const UPDATE_TTL_MS = 5 * 60 * 1000
 
-async function getUpdateStatus(force = false) {
+export async function getUpdateStatus(force = false) {
   const fresh = Date.now() - updateCache.checkedAt < UPDATE_TTL_MS
   if (!force && fresh && updateCache.result) return updateCache.result
   const current = readVersionAt(SELF_ROOT)
   let result
   try {
-    const remote = await fetchRemoteVersion()
-    result = { ok: true, current, remote, hasUpdate: current !== null && semverCompare(remote, current) > 0, checkedAt: Date.now() }
+    const details = await fetchRemoteUpdate()
+    const remote = details.manifest.version
+    result = { ok: true, current, remote, hasUpdate: current !== null && semverCompare(remote, current) > 0, checkedAt: Date.now(),
+      summary: details.summary, publishedAt: details.publishedAt, releaseUrl: details.releaseUrl,
+      compatibility: details.compatibility, confirmationToken: details.confirmationToken,
+      canInstall: details.compatibility.status === 'compatible', channel: PREVIEW_CHANNEL ? UPDATE_REF : 'stable' }
   } catch {
     // 错误信息固定文案, 不外泄内部异常细节 (沿用 v0.5.16 安全审计口径)
     result = { ok: false, current, remote: null, hasUpdate: false, checkedAt: Date.now() }
@@ -310,14 +534,19 @@ const CONFIG_VERSION = 2
  * 所以这里把所有"本该是数组/对象/数字"的字段统一消毒, 消毒不了就丢弃, 绝不让 apply() 抛。
  * ⚠️ 新增持久化字段时, 记得同步登记到这里。
  */
+/** v1.6.8: 重复提醒间隔上限(小时) —— 一周。0 = 只在跨档时提醒一次(旧行为)。 */
+const ALERT_REPEAT_MAX_HOURS = 168
+
 const ARRAY_FIELDS = ['customRelays', 'customModels', 'officialProviders', 'dshProviderOptOut', 'presets']
-const OBJECT_FIELDS = ['whaleSettings', 'prices', 'relayEndpoints']
+const OBJECT_FIELDS = ['whaleSettings', 'prices', 'relayEndpoints', 'alertState']
 const NUMBER_FIELDS = [
   ['refreshIntervalMs', 1000, 60000],   // H-4b: 曾经能持久化成 -1 → 3 秒内 1794 次上游请求
   ['clientPollIntervalMs', 1000, 60000],
   ['timeoutMs', 1000, 60000],
   ['safeThreshold', 0, Number.MAX_SAFE_INTEGER],
   ['warnThreshold', 0, Number.MAX_SAFE_INTEGER],
+  ['dailyLimit', 0, Number.MAX_SAFE_INTEGER],   // v1.6.2: 今日花销提醒阈值, 0=关闭
+  ['alertRepeatHours', 0, ALERT_REPEAT_MAX_HOURS], // v1.6.8: 重复提醒间隔(小时), 0=只在跨档提醒一次
   ['configVersion', 0, Number.MAX_SAFE_INTEGER],
 ]
 
@@ -487,16 +716,25 @@ const collectProviderFields = (text, wanted) => {
       if (kv !== null && kv.key !== 'llm-pi-ai') { sectionIndent = -1; sectionChildIndent = -1 }
     }
     const kv = keyOf(trimmed)
-    if (kv === null) continue                    // 列表项 (`- id: x`) 等一概跳过
+    if (kv === null) {
+      // v1.4.6: ≥0.1.7 的 patch 层里 llm-pi-ai 是**列表项** (`- id: llm-pi-ai`), keyOf 会跳过 `-` 开头的行,
+      //   这里单独认一次; 其下的 config: / providers: 都比它深, 后续缩进判定照旧有效。
+      const item = /^-\s*id:\s*(\S+)\s*$/.exec(trimmed)
+      if (item !== null) {
+        if (item[1] === 'llm-pi-ai' && sectionIndent < 0) { sectionIndent = indent; sectionChildIndent = -1 }
+        else if (sectionIndent >= 0 && indent <= sectionIndent) { sectionIndent = -1; sectionChildIndent = -1 }
+      }
+      continue
+    }
     if (sectionIndent < 0) {
       if (kv.key === 'llm-pi-ai' && kv.value === '') { sectionIndent = indent; sectionChildIndent = -1 }
       continue
     }
     if (providersIndent < 0) {
       if (indent <= sectionIndent) continue
-      if (sectionChildIndent < 0) sectionChildIndent = indent
-      // 只认 llm-pi-ai 的直接子键 providers, 不误吃更深层同名键
-      if (indent === sectionChildIndent && kv.key === 'providers' && kv.value === '') providersIndent = indent
+      // v1.4.6: 不再要求 providers 是 llm-pi-ai 的**直接**子键 —— patch 格式里它被包在 config: 之下(多一层),
+      //   而"该段内第一个 value 为空的 providers 键"在两种格式下都唯一。
+      if (kv.key === 'providers' && kv.value === '') providersIndent = indent
       continue
     }
     if (current === '') {
@@ -619,6 +857,17 @@ export const planBalancesFetch = ({ force = false, peek = false, hasData = false
 export const clampRefreshSec = (v) => Math.min(Math.max(Math.round(Number(v) || 1), 1), 60)
 
 /**
+ * 毫秒级夹取 (2026-09-22 补漏): sanitizePersistedShape 只夹**状态文件**读出来的值,
+ * 而从 config (cordis.patch.yml / profile 配置) 进来的值**没有任何夹取** ——
+ * 于是 patch 里写死的 refreshIntervalMs: 300000 (300 秒) 会绕过 clampRefreshSec 直接生效,
+ * 用户看到「刷新间隔 300 秒」。这里给 config 这条路补上同一道闸门。
+ */
+export const clampMs = (v, min, max, fallback) => {
+  const n = Number(v)
+  return Number.isFinite(n) ? Math.min(Math.max(Math.round(n), min), max) : fallback
+}
+
+/**
  * 第 2 层自动判定的补充素材: 提取 settings.yaml 里 `llm-pi-ai.providers.<name>` 的
  * **全部 provider 名**，包括没有写 baseURL 的 provider。这样即使别人没有手写 URL，
  * 只要用的是已知官方 preset 名，也能自动判定为官方，而不必先手动补 settings。
@@ -648,15 +897,22 @@ export function parseProviderNames(text) {
       if (kv !== null && kv.key !== 'llm-pi-ai') { sectionIndent = -1; sectionChildIndent = -1 }
     }
     const kv = keyOf(trimmed)
-    if (kv === null) continue
+    if (kv === null) {
+      // v1.4.6: 同 collectProviderFields —— 认 `- id: llm-pi-ai` 这种列表项写法(≥0.1.7 的 patch 层)
+      const item = /^-\s*id:\s*(\S+)\s*$/.exec(trimmed)
+      if (item !== null) {
+        if (item[1] === 'llm-pi-ai' && sectionIndent < 0) { sectionIndent = indent; sectionChildIndent = -1 }
+        else if (sectionIndent >= 0 && indent <= sectionIndent) { sectionIndent = -1; sectionChildIndent = -1 }
+      }
+      continue
+    }
     if (sectionIndent < 0) {
       if (kv.key === 'llm-pi-ai' && kv.value === '') { sectionIndent = indent; sectionChildIndent = -1 }
       continue
     }
     if (providersIndent < 0) {
       if (indent <= sectionIndent) continue
-      if (sectionChildIndent < 0) sectionChildIndent = indent
-      if (indent === sectionChildIndent && kv.key === 'providers' && kv.value === '') providersIndent = indent
+      if (kv.key === 'providers' && kv.value === '') providersIndent = indent
       continue
     }
     if (indent > providersIndent && kv.value === '') {
@@ -671,18 +927,86 @@ export function parseProviderNames(text) {
  * 第 2 层判定结果: { providerName: 'official' | 'relay' }。
  * 没有 baseURL / baseURL 解析不出主机名的 provider **不写进结果** (不表态, 交第 3 层)。
  */
-export function computeProviderKinds(text) {
-  const kinds = {}
-  for (const [name, url] of Object.entries(parseProviderBaseURLs(text))) {
-    const host = hostOfUrl(url)
-    if (host === '') continue
-    kinds[name] = isOfficialHost(host) ? 'official' : 'relay'
+/**
+ * DSH 内置 provider 目录 (@earendil-works/pi-ai 的 dist/providers/data/*.json)。
+ *
+ * 为什么需要它: provider **省略 baseURL** 时, 宿主会拿内置目录里的 baseUrl 去请求 ——
+ * 所以"这个 provider 到底连的是官方还是中转站"其实是有据可查的, 不必靠名字猜。
+ * (实测 xiaomi.json: {"provider":"xiaomi","baseUrl":"https://api.xiaomimimo.com/v1"})
+ *
+ * 维护者反馈: "有些官方是没有开放余额接口, 这个不应该转入中转站" ——
+ * 此前没写 baseURL 的一律按中转站, 会把「官方直连但官方没开余额接口」的 provider
+ * (OpenAI / Claude / Gemini / MiMo / 豆包 / 混元 那类) 也标成中转站, 属于错分类。
+ * 现在改成: 显式 baseURL 优先, 没写就去目录里查它的默认 baseUrl, 再走官方域名白名单。
+ *
+ * ⚠️ 铁律 9 仍然成立, 只是不再用"名字"下结论: 判定素材是**域名**(显式的或目录给的),
+ *   名字只在"目录里有没有这条"的意义上被用到。目录里查不到的, 依旧按中转站(保守默认)。
+ */
+let catalogCache = null
+
+const catalogDataDir = () => {
+  const tries = []
+  try {
+    const req = createRequire(import.meta.url)
+    let dir = dirname(req.resolve('@earendil-works/pi-ai'))
+    for (let i = 0; i < 4 && dir !== dirname(dir); i++) {
+      tries.push(join(dir, 'providers', 'data'), join(dir, 'dist', 'providers', 'data'))
+      dir = dirname(dir)
+    }
+  } catch { /* 解析不到就只试兜底路径 */ }
+  tries.push(join(DSH_HOME_DIR, 'node_modules', '@earendil-works', 'pi-ai', 'dist', 'providers', 'data'))
+  for (const t of tries) { try { if (statSync(t).isDirectory()) return t } catch { /* 下一个 */ } }
+  return null
+}
+
+/** { providerName: 内置 baseUrl } —— 进程内缓存一次 (目录随宿主安装, 运行期不变) */
+export const catalogBaseURLs = () => {
+  if (catalogCache !== null) return catalogCache
+  const out = {}
+  const dir = catalogDataDir()
+  if (dir !== null) {
+    try {
+      for (const file of readdirSync(dir)) {
+        if (!file.endsWith('.json')) continue
+        let json = null
+        try { json = JSON.parse(readFileSync(join(dir, file), 'utf8')) } catch { continue }
+        if (json === null || typeof json !== 'object') continue
+        // 结构: { <apiKind>: { <modelId>: { provider, baseUrl, ... } } }
+        for (const group of Object.values(json)) {
+          if (group === null || typeof group !== 'object') continue
+          for (const model of Object.values(group)) {
+            if (model === null || typeof model !== 'object') continue
+            const p = model.provider, u = model.baseUrl
+            if (typeof p === 'string' && typeof u === 'string' && p !== '' && u !== '' && out[p] === undefined) out[p] = u
+          }
+        }
+      }
+    } catch { /* 目录读不动就当没有 */ }
   }
-  // v1.4.0 移除「按 provider 名字猜官方」的兜底。
-  // 旧代码把「名字恰好等于某个预设 id 且没写 baseURL」判成 official —— 这与本文件 232-240 行的政策
-  // 和 AGENTS.md 铁律 9 直接冲突:「没写 baseURL 的 provider 是不表态、交 `-official` 后缀兜底」。
-  // 理由(AGENTS.md 原话): 内置目录指向官方域名 ≠ 用户的 key 来自官方(`xiaomi` 就是反例)。
-  // 只看名字会把「恰好同名的中转站会话」顶上官方余额 —— 不表态比猜错安全。
+  catalogCache = out
+  return out
+}
+
+export function computeProviderKinds(text, catalog = catalogBaseURLs()) {
+  const kinds = {}
+  // catalog 可注入: CI 里没装 @earendil-works/pi-ai(宿主提供的 peer), 目录读不到,
+  // 但判定逻辑本身必须可测 —— 测试直接传一份 { provider: baseURL } 进来。
+  // v1.4.6 (维护者要求「固定官方的, 识别不到官方的一律当中转站」):
+  //   判定素材是**域名** —— 显式 baseURL 优先, 没写就用内置目录给的默认 baseUrl(见 catalogBaseURLs),
+  //   只有主机名明确命中官方域名白名单才算 official, 其余一律 relay。
+  //   旧实现是"没写 baseURL 就整个不写进结果(不表态)", 后果是设置面板的「自动判定结果」对这类
+  //   provider 一片空白 —— 维护者实测"一个都没识别到中转站"。
+  //   ⚠️ 这里**不按 provider 名字下结论**(铁律 9: 恰好同名的中转站会被顶上官方余额) ——
+  //   名字只用来"在目录里查有没有这条", 结论始终来自域名。
+  const explicit = parseProviderBaseURLs(text)
+  const cat = (catalog !== null && typeof catalog === 'object') ? catalog : {}
+  for (const name of parseProviderNames(text)) {
+    // 判定素材三级: ① provider 自己写的 baseURL ② 没写 → 内置目录里的默认 baseUrl
+    //   (宿主就是这么解析的) ③ 都没有 → 空, 落中转站。
+    const url = explicit[name] !== undefined ? explicit[name] : (cat[name] !== undefined ? cat[name] : '')
+    const host = hostOfUrl(url)
+    kinds[name] = (host !== '' && isOfficialHost(host)) ? 'official' : 'relay'
+  }
   return kinds
 }
 
@@ -705,28 +1029,82 @@ export const normalizeOfficialProviders = (input) => {
   return out
 }
 
-const SETTINGS_FILE = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'settings.yaml')
+const DSH_HOME_DIR = process.env.DSH_HOME || join(homedir(), '.dsh')
+
+/**
+ * provider 配置的候选文件 (按优先级)。两代存放位置:
+ *   ≤ 0.1.6 —— `~/.dsh/settings.yaml` 顶层的 `llm-pi-ai:` 段落;
+ *   ≥ 0.1.7 —— provider 段落被宿主**迁进 profile 的 patch 层**:
+ *     `~/.dsh/profiles/<profile>/cordis.patch.yml`, 形状是 loader patch 数组里的
+ *     `- id: llm-pi-ai` + `config: { providers: ... }`; 老文件随后被写成 settings.yaml.imported。
+ *     (据 dsh-settings 源码里的 "removed settings.yaml sections" 迁移逻辑。)
+ * 新位置优先: 迁移之后老文件即使还在, 也已是"导入过的存档", 不该盖住活配置。
+ */
+const settingsCandidateFiles = () => {
+  const out = []
+  try {
+    for (const name of readdirSync(join(DSH_HOME_DIR, 'profiles')).sort()) {
+      const f = join(DSH_HOME_DIR, 'profiles', name, 'cordis.patch.yml')
+      if (existsSync(f)) out.push(f)
+    }
+  } catch { /* 没有 profiles 目录: 老版本 */ }
+  out.push(join(DSH_HOME_DIR, 'settings.yaml'))
+  return out
+}
 /**
  * settings.yaml 派生数据缓存, 按 mtime 失效 (轮询每 5s 一次, 别每次都解析)。
  *   kinds   = 第 2 层官方/中转判定素材
  *   entries = v1.4.0「真自动」: 各 provider 的 baseURL / apiKeyEnv,
  *             用来把 DSH 里配好的中转站合成可查余额的条目
  */
-let settingsDerivedCache = { mtimeMs: -1, kinds: {}, entries: {} }
+let settingsDerivedCache = { stamp: '', kinds: {}, entries: {}, source: '' }
 
-/** 读 settings.yaml 并算出全部派生数据 (mtime 缓存) */
+/**
+ * 读 provider 配置并算出全部派生数据。
+ * v1.4.6: 从"只读一个 settings.yaml"改成**扫全部候选位置再合并** —— 0.1.7 把段落迁进
+ *   profile 的 cordis.patch.yml 之后, 老路径已经没有文件, 旧实现返回空表,
+ *   设置面板的「自动判定结果」于是一条都列不出来(维护者实测"一个都没识别到中转站")。
+ * 缓存用「各候选文件的路径 + mtime」拼成指纹 —— 任一文件变动才重算(轮询 5s 一次, 别反复解析百 KB YAML)。
+ */
 const readSettingsDerived = () => {
-  try {
-    const mtimeMs = statSync(SETTINGS_FILE).mtimeMs
-    if (mtimeMs === settingsDerivedCache.mtimeMs) return settingsDerivedCache
-    const text = readFileSync(SETTINGS_FILE, 'utf8')
-    settingsDerivedCache = { mtimeMs, kinds: computeProviderKinds(text), entries: parseProviderEntries(text) }
-    return settingsDerivedCache
-  } catch {
-    // settings.yaml 不存在/读不动: 不表态, 全交给第 1、3 层, 也没有可自动发现的中转站
-    settingsDerivedCache = { mtimeMs: -1, kinds: {}, entries: {} }
-    return settingsDerivedCache
+  const files = settingsCandidateFiles()
+  const stamp = files
+    .map((f) => { try { return f + '@' + statSync(f).mtimeMs } catch { return f + '@-' } })
+    .join('|')
+  if (stamp === settingsDerivedCache.stamp) return settingsDerivedCache
+
+  const kinds = {}
+  const entries = {}
+  let source = ''
+  for (const f of files) {
+    let text = ''
+    try { text = readFileSync(f, 'utf8') } catch { continue }
+    const e = parseProviderEntries(text)
+    if (Object.keys(e).length === 0) continue
+    if (source === '') source = f
+    // 先到先得: 新位置(profiles/*/cordis.patch.yml)排在前面
+    for (const [name, v] of Object.entries(e)) if (!(name in entries)) entries[name] = v
+    for (const [name, v] of Object.entries(computeProviderKinds(text))) if (!(name in kinds)) kinds[name] = v
   }
+  settingsDerivedCache = { stamp, kinds, entries, source }
+  return settingsDerivedCache
+}
+
+/** 官方 DeepSeek 插件的凭据引用；不从 pi-ai 中转 provider 猜 Key。 */
+export function parseOfficialDeepSeekRef(text) {
+  const entries = String(text || '').split(/(?=^\s*- id:)/m)
+  for (const entry of entries) {
+    if (!/^\s*- id:\s*["']?llm-deepseek["']?\s*$/m.test(entry)
+        || !/^\s*name:\s*["']?@deepseek-ai\/dsh-llm-deepseek-api-key["']?\s*$/m.test(entry)) continue
+    const ref = entry.match(/^\s*apiKeyEnv:\s*["']?([A-Za-z_][A-Za-z0-9_]*)["']?\s*$/m)?.[1]
+    const base = entry.match(/^\s*baseURL:\s*["']?([^\s"']+)/m)?.[1]
+    if (ref && (!base || ['api.deepseek.com', 'api.deepseek.cn'].includes(hostOfUrl(base)))) return ref
+  }
+  return ''
+}
+const officialDeepSeekRef = () => {
+  const profile = process.env.DSHA_STARTUP_PROFILE || 'web'
+  try { return parseOfficialDeepSeekRef(readFileSync(join(DSH_HOME_DIR, 'profiles', profile, 'cordis.patch.yml'), 'utf8')) } catch { return '' }
 }
 
 /** 读 settings.yaml 算第 2 层判定 */
@@ -761,10 +1139,14 @@ const fnv1a = (str) => {
 // 北京时间 09:00~12:00 / 14:00~18:00 为峰时(100%), 其余时段谷时特惠(5折)
 // ============================================================
 // v1.3.4 (2026-09-10): 官方同日 12:00 起调整 Flash 系列定价(最高降幅 60%), 并收敛模型名 ——
-//   deepseek-v4-flash → deepseek-flash (旧名仍可调用, 由 V4.1-Flash 服务并按 Flash 价计费, 定价页注 1);
-//   2026-09-14 12:00 后 deepseek-v4-pro 的请求将全部路由到 V4.1-Flash 并按 Flash 价计费(官方计划下线 Pro, 注 2)。
+//   deepseek-v4-flash → deepseek-flash (旧名仍可调用, 由 V4.1-Flash 服务并按 Flash 价计费, 定价页注 1)。
+// ⚠️ 2026-09-22 复核更正: 官方注(2) 已改写为「为响应广大用户的需求, 我们决定在 2026 年 9 月 14 日之后
+//   继续提供 DeepSeek V4 Pro 的 API 调用服务, 计费方式保持不变」—— **Pro 档仍在售、仍按 Pro 价计费**,
+//   故本表 pro 档保留正确。此前「9-14 后 pro 请求全部路由到 Flash 并按 Flash 价计费」的记录已作废, 勿再回填。
 // 来源: https://api-docs.deepseek.com/zh-cn/quick_start/pricing (CNY) 与 /quick_start/pricing (USD) ——
-//   USD 表为官方直发(非 ÷7 换算, 实际口径约 1 USD ≈ 6.67 CNY), pro 档与调整前一致, 未变动。
+//   USD 表为官方直发(非 ÷7 换算, 实际口径约 1 USD ≈ 6.67 CNY), 已逐项核对与表内值一致 (2026-09-22)。
+//   ⚠️ 官方英文页明确: 高峰时段为 UTC 01:00-04:00 / 06:00-10:00 (北京 9-12 / 14-18) 周一至周五,
+//      **excluding Chinese public holidays**(不含中国法定节假日) —— 见 isPeakTime 的已知缺口。
 export const V4_RATES = {
   CNY: {
     peak: { 'deepseek-flash': { cacheHit: 0.04, cacheMiss: 2, output: 8 }, 'deepseek-v4-pro': { cacheHit: 0.3, cacheMiss: 9, output: 27 } },
@@ -784,10 +1166,41 @@ export const V4_RATES = {
  */
 const USD_TO_CNY_RATE = 7
 
-/** 北京时间(UTC+8)的星期与小时, 先 +8h 再取值, 避免跨日界(00:00~08:00)星期比北京时间早一天 */
+/**
+ * 中国法定节假日 (2026 年) —— DeepSeek 官方定价页**英文版**明确:
+ *   "Peak hours are 01:00 - 04:00 and 06:00 - 10:00 UTC, Monday through Friday,
+ *    **excluding Chinese public holidays**. All other hours are off-peak, including weekends
+ *    and Chinese public holidays in full."
+ * 即法定节假日**全天按空闲(谷)价**计费。这不是可选项: 漏掉它会在这 33 天里把消耗按峰价高估一倍。
+ * 来源: 国务院办公厅《关于2026年部分节假日安排的通知》(2025-11-04 发布)
+ *   https://www.gov.cn/zhengce/zhengceku/202511/content_7047091.htm
+ * ⚠️ 维护: 国务院办每年 11 月公布**次年**安排 —— 跨年前必须补下一年表; 表外年份按"无节假日"回落旧行为(保守)。
+ * ⚠️ 调休上班的周末(2026 年为 02-14 / 02-28 / 05-09 / 09-20 / 10-10)不列入本表:
+ *   官方口径是 "Monday through Friday" 字面 —— 周末本身就已是谷时, 无需专门处理。
+ */
+const CN_HOLIDAY_RANGES = {
+  2026: [
+    ['2026-01-01', '2026-01-03'], // 元旦 3 天
+    ['2026-02-15', '2026-02-23'], // 春节 9 天
+    ['2026-04-04', '2026-04-06'], // 清明节 3 天
+    ['2026-05-01', '2026-05-05'], // 劳动节 5 天
+    ['2026-06-19', '2026-06-21'], // 端午节 3 天
+    ['2026-09-25', '2026-09-27'], // 中秋节 3 天
+    ['2026-10-01', '2026-10-07'], // 国庆节 7 天
+  ],
+}
+
+/** 该北京日期 (yyyy-mm-dd) 是否落在法定节假日区间内。未收录的年份返回 false (不表态)。 */
+export const isCnHoliday = (ymd) => {
+  const ranges = CN_HOLIDAY_RANGES[Number(String(ymd).slice(0, 4))]
+  if (!Array.isArray(ranges)) return false
+  return ranges.some(([from, to]) => ymd >= from && ymd <= to)
+}
+
+/** 北京时间(UTC+8)的日期/星期/小时, 先 +8h 再取值, 避免跨日界(00:00~08:00)星期比北京时间早一天 */
 const bjtParts = (timestamp) => {
   const d = new Date(timestamp + 8 * 3600 * 1000)
-  return { weekday: d.getUTCDay(), hour: d.getUTCHours() }
+  return { weekday: d.getUTCDay(), hour: d.getUTCHours(), ymd: d.toISOString().slice(0, 10) }
 }
 
 /**
@@ -796,13 +1209,15 @@ const bjtParts = (timestamp) => {
  *  周末(周六日): 整天都是谷时特惠。
  */
 export const isPeakTime = (timestamp = Date.now()) => {
-  const { weekday, hour } = bjtParts(timestamp)
+  const { weekday, hour, ymd } = bjtParts(timestamp)
   // 周末(0=周日, 6=周六)整天谷时
   if (weekday === 0 || weekday === 6) return false
+  // 法定节假日全天谷时 (官方英文定价页: "excluding Chinese public holidays ... in full")
+  if (isCnHoliday(ymd)) return false
   return (hour >= 9 && hour < 12) || (hour >= 14 && hour < 18)
 }
 
-/** 当前是否周末 */
+/** 当前是否周末 (注意: 周末与法定节假日是两回事, 峰谷判定请用 isPeakTime) */
 export const isWeekend = (timestamp = Date.now()) => {
   const { weekday } = bjtParts(timestamp)
   return weekday === 0 || weekday === 6
@@ -837,27 +1252,102 @@ export const MODEL_PRICES = {
   // 来源: modelradar.cn 2026-09-03 快照 (各模型 sourceUrl 均指官方定价页)。
   //       仅采纳与官方口径无分歧的条目; 与原表冲突时保留原值并注明 ——
   //       radar 的 GPT-5.6 系输出价全呈「输入×1.25」异常模式, 疑似抓错列, 未采纳。
-  // ⚠️ OpenAI / Anthropic / Gemini 官方定价页在本容器环境被 403 / 地域封锁, v1.4.0 未能取到原文复核,
-  //    下列海外条目仍为 radar/hermes-agent 二手源, 未逐条核实 —— 有账单单据时优先以单据为准。
+  // ⚠️ 上注为 v1.4.0 时期状况。v1.4.5 (2026-09-22) 起: OpenAI / Anthropic / **Gemini** 三家均已用官方原文逐条核对
+  //    (OpenAI / Anthropic 的价格藏在页面内嵌转义 JSON 里; Gemini 走 ai.google.dev 定价页的 Standard 档表),
+  //    并**整段补录 xAI Grok** —— 此前表内没有任何 grok 键, 全部落 defaultPrices。
+  //    下列海外条目现为官方现价; 有账单单据时仍以单据为准。
+  // ✅ 2026-09-27 复核: **Gemini / xAI / 智谱三家已全部用官方原文逐条比对**，现役主力**逐项一致**。
+  //    取证技巧(下次直接用): docs.bigmodel.cn 与 docs.x.ai 都支持在 URL 后加 **`.md`** 直接拿 markdown 正文
+  //    (`/cn/guide/start/pricing.md`、`/developers/pricing.md`)，SPA 抓不到正文的问题由此解决；
+  //    Gemini 走 devsite 生产后端 `googledevai-dot-devsite-v2-prod-3p.appspot.com`（ai.google.dev 直连会 302 到登录）。
+  //    ⚠️ 三条仍是记录在案的差异/取舍，**改之前先想清楚**：
+  //      ① `glm-4-flash`：官方 GLM-4-Flash-250414 是**免费**，本表留 ¥0.1/¥0.1 是维护者有意取的「宁高不低」
+  //         (防中转站仍计费)。代价是官方直连用户会被高估。
+  //      ② `gemini-omni-flash`：官方 Omni 系列**不给 context caching 价**，本表 cacheHit 填了与输入等值的 1.5
+  //         (表达「无缓存折扣」)。语义保守，但若官方实际有折扣就是高估。
+  //      ③ `gemini-3.1-pro`：官方页只列 `gemini-3.1-pro-preview`，本表用短名作键 —— 靠 SAFE_SUFFIX_RE
+  //         前缀兜底能覆盖 `-preview`，价格一致，故未改名。
+  //    已从官方定价页消失、仅作旧配置估算的: Gemini 2.0 / 1.5 全系、xAI `grok-code-fast-1` / `grok-code-fast`
+  //    (2026-05-15 退役, 现重定向到 grok-4.3 或 grok-build-0.1)。
   // OpenAI GPT-5.6 系列 (radar 报 sol 输出 $5 / terra $2.5 / luna $0.25, 均为输入×1.25 异常模式, 未采纳)
-  'gpt-5.6-sol':          { cacheHit: 0.5,   cacheMiss: 4.0,   output: 20.0 },  // 临时促销价(至少到 2026-11-21)
+  // —— 2026-09-22 官方 API 定价页 (openai.com/api/pricing 的内嵌 JSON) 逐条核对 ——
+  //    注: 该页 HTML 里的价格藏在 <script> 的双层转义 JSON 中, 不在 <table> 里; 本容器内 chromium 无网络渲染不了,
+  //    但直接取页面 + 还原转义即可拿到官方原文 (无需代理)。同一页还列出 GPT-Image-2.5 / GPT-Live-1 / GPT-Realtime-2.1 mini。
+  //    ⚠️ 官方现列表价 $5/$30, 已无促销标记 —— 旧值 4/20 记的是"临时促销价", 按 AGENTS.md 红线(促销必须有官方原文兜底)改用官方现价。
+  // 2026-10-10 新模型：models.dev 的官方提供商条目与 LiteLLM 直连条目交叉核对。
+  // ⚠️ 参考价，未核实官方原文（OpenAI 页面403，Anthropic 文档不可达）。单位 USD / 1M tokens。
+  // 来源 https://github.com/sst/models.dev/tree/dev/providers/openai/models
+  //      https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json
+  // 这里只采用 Standard 基础档；GPT-6/6.1 >272K、Haiku5.5 >100K 及 priority/ultrafast/Batch 不在本表覆盖。
+  // 使用长上下文/快档应手动覆盖价格，不能把这些参考基础价当平台实际扣费。
+  'gpt-6.1-sol':          { cacheHit: 0.10, cacheMiss: 2.00, cacheWrite: 2.50,  output: 10.00 },
+  'gpt-6-sol':            { cacheHit: 0.20, cacheMiss: 2.00, cacheWrite: 2.50,  output: 10.00 },
+  'gpt-6-luna':           { cacheHit: 0.01, cacheMiss: 0.10, cacheWrite: 0.125, output: 0.50 },
+  // 来源 https://github.com/sst/models.dev/tree/dev/providers/anthropic/models ，同上 LiteLLM 交叉核对。
+  'claude-opus-5-5':      { cacheHit: 0.20, cacheMiss: 4.00, cacheWrite: 5.00,  output: 20.00 },
+  'claude-sonnet-5-5':    { cacheHit: 0.10, cacheMiss: 2.00, cacheWrite: 2.50,  output: 10.00 },
+  'claude-haiku-5-5':     { cacheHit: 0.01, cacheMiss: 0.10, cacheWrite: 0.125, output: 0.50 },
+  'gpt-6-astra':          { cacheHit: 1.0,   cacheMiss: 10.0,  output: 50.0 },  // 官方 Input $10 / Cached input $1 / Output $50 (官方页当前最强档)
+  'gpt-5.6-sol':          { cacheHit: 0.5,   cacheMiss: 5.0,   output: 30.0 },  // 官方 $5 / $0.5 / $30
   'gpt-5.6-terra':        { cacheHit: 0.2,   cacheMiss: 2.0,   output: 12.0 },  // 2026-07-30 降价
   'gpt-5.6-luna':         { cacheHit: 0.02,  cacheMiss: 0.2,   output: 1.2 },   // 2026-07-30 降价
-  'gpt-5.3-codex':        { cacheHit: 0.175, cacheMiss: 1.75,  output: 14.0 },  // radar 2026-09-03, OpenAI 官方页
+  'gpt-5.3-codex':        { cacheHit: 0.175, cacheMiss: 1.75,  output: 14.0 },  // ⚠️ 2026-09-22 复核: OpenAI 官方 API 定价页现**未列**此模型(页面只列 GPT-6 Astra / GPT-5.6 三档 / 图像 / Live / Realtime), 值仍为 radar 二手源, 未能取证
   // Anthropic Claude 5
-  'claude-opus-5':        { cacheHit: 0.5,   cacheMiss: 5.0,   output: 25.0 },  // v1.2.0 修正缓存读价: Anthropic 缓存读=0.1×输入, radar 对照 claude.com/pricing (opus-4-8 亦 $0.5); 原误标"无缓存折扣"
-  'claude-sonnet-5':      { cacheHit: 0.2,   cacheMiss: 2.0,   output: 10.0 },
-  'claude-sonnet-4-6':    { cacheHit: 0.30,  cacheMiss: 3.00,  output: 15.00 },
-  'claude-haiku-4-5':     { cacheHit: 0.10,  cacheMiss: 1.00,  output: 5.00 },
-  // Google Gemini 3.x
-  'gemini-3.7-flash':     { cacheHit: 0.075, cacheMiss: 0.75,  output: 3.75 },  // 促销至 2026-12-31, 之后翻倍
-  'gemini-3.8-flash':     { cacheHit: 0.075, cacheMiss: 0.75,  output: 3.75 },  // radar 2026-09-02 新增, 与 3.7/3.6 同价
-  'gemini-3.6-flash':     { cacheHit: 0.075, cacheMiss: 0.75,  output: 3.75 },  // 促销至 2026-12-31, 之后翻倍
-  'gemini-3-flash-preview': { cacheHit: 0.025, cacheMiss: 0.5, output: 3.0 },
-  'gemini-3.5-flash-lite':  { cacheHit: 0.3,  cacheMiss: 0.3,  output: 2.5 },   // 无缓存折扣
-  'gemini-3.1-pro':       { cacheHit: 2.0,   cacheMiss: 2.0,   output: 12.0 },  // 无缓存折扣; 长上下文 $4/$24
-  'gemini-2.5-pro':       { cacheHit: 0.125, cacheMiss: 1.25,  output: 10.00 },
-  'gemini-2.5-flash':     { cacheHit: 0.03,  cacheMiss: 0.3,   output: 2.5 },   // radar 2026-09-03, 1M ctx
+  'claude-opus-5':        { cacheHit: 0.5,   cacheMiss: 5.0,   cacheWrite: 6.25,  output: 25.0 },  // v1.2.0 修正缓存读价: Anthropic 缓存读=0.1×输入, radar 对照 claude.com/pricing (opus-4-8 亦 $0.5); 原误标"无缓存折扣"
+  'claude-sonnet-5':      { cacheHit: 0.2,   cacheMiss: 2.0,   cacheWrite: 2.5,   output: 10.0 },
+  'claude-sonnet-4-6':    { cacheHit: 0.30,  cacheMiss: 3.00,  cacheWrite: 3.75,  output: 15.00 },
+  'claude-haiku-4-5':     { cacheHit: 0.10,  cacheMiss: 1.00,  cacheWrite: 1.25,  output: 5.00 },
+  // —— 2026-09-22 官方 API 定价页 (anthropic.com/pricing 的 ApiTab) 核对后补录 ——
+  //    官方**同时**给出 Prompt caching 的 Read/Write 两档: Write 一律 = 输入价 ×125%
+  //    (Opus 5 $6.25/$5、Sonnet 5 $2.50/$2、Haiku 4.5 $1.25/$1、Fable 5.1 $12.50/$10 全部吻合),
+  //    Read 多数 = 输入价 ×10%(本表 cacheHit 口径), **Fable 5.1 例外仅 2.5%**。
+  //    ⚠️ 现有 claude-opus-5 / sonnet-5 / sonnet-4-6 / haiku-4-5 四条经核对与官方逐项一致, 未改动。
+  'claude-fable-5.1':     { cacheHit: 0.25,  cacheMiss: 10.0,  cacheWrite: 12.5,  output: 50.0 },  // 官方 $10 / $0.25(缓存读仅 2.5%) / $50; 缓存写 $12.50
+  'claude-fable-5':       { cacheHit: 1.0,   cacheMiss: 10.0,  cacheWrite: 12.5,  output: 50.0 },  // 官方 $10 / $1 / $50; 缓存写 $12.50
+  'claude-opus-4-8':      { cacheHit: 0.5,   cacheMiss: 5.0,   cacheWrite: 6.25,  output: 25.0 },  // 官方 $5 / $0.5 / $25; 缓存写 $6.25
+  'claude-sonnet-4-5':    { cacheHit: 0.30,  cacheMiss: 3.0,   cacheWrite: 3.75,  output: 15.0 },  // 官方 $3 / $0.30 / $15; 缓存写 $3.75
+  // —— Google Gemini (2026-09-22 官方页 ai.google.dev/gemini-api/docs/pricing 的 Standard 档 Text API 逐条核对) ——
+  //    官方口径: Context caching price 一律 = 输入价 **10%**(3.7/3.8/3.6 Flash $0.075/$0.75、3.5 Flash $0.15/$1.50、
+  //    3.5 Flash-Lite $0.03/$0.30、3.1 Flash-Lite $0.025/$0.25、3.1 Pro $0.20/$2.00、3 Flash Preview $0.05/$0.50、
+  //    2.5 Pro $0.125/$1.25、2.5 Flash $0.03/$0.30、2.5 Flash-Lite $0.01/$0.10 全部吻合)。
+  //    ⇒ 凡官方页**列出** Context caching price 的条目一律按官方值入库。旧表把 3 条标成「无缓存折扣」是错的(见下三条 ✗→✓)。
+  //    ⚠️ 促销价: 3.6/3.7/3.8 Flash 官方明文 "through December 31, 2026", 到期翻倍($1.50/$7.50/缓存 $0.15) —— 有到期日兜底才可入库。
+  //    ⚠️ 分档: 3.1 Pro / 2.5 Pro 官方另有 >200k 档, 本表取主档(与 Claude 同口径), 更贵档见各条注释。
+  'gemini-3.8-flash':     { cacheHit: 0.075, cacheMiss: 0.75,  output: 3.75 },  // 官方 $0.75/$3.75/缓存 $0.075; 促销至 2026-12-31, 之后 $1.50/$7.50
+  'gemini-3.7-flash':     { cacheHit: 0.075, cacheMiss: 0.75,  output: 3.75 },  // 同上
+  'gemini-3.6-flash':     { cacheHit: 0.075, cacheMiss: 0.75,  output: 3.75 },  // 同上
+  'gemini-3.5-flash':     { cacheHit: 0.15,  cacheMiss: 1.5,   output: 9.0 },   // 官方 $1.50/$9.00/缓存 $0.15 ✚补录: 旧表无此键 → 落默认价($1/$2), 输出低估 4.5 倍
+  'gemini-3.5-flash-lite':  { cacheHit: 0.03,  cacheMiss: 0.3,  output: 2.5 },   // 官方 $0.30/$2.50/缓存 $0.03 ✗→✓ 旧 cacheHit 0.3 且标「无缓存折扣」, 官方页明列 $0.03 → 高估缓存读 10 倍
+  'gemini-3.1-flash-lite':  { cacheHit: 0.025, cacheMiss: 0.25, output: 1.5 },  // 官方 $0.25(text/图/视频)/$1.50/缓存 $0.025 ✚补录
+  'gemini-3-flash-preview': { cacheHit: 0.05,  cacheMiss: 0.5,  output: 3.0 },   // 官方 $0.50/$3.00/缓存 $0.05 ✗→✓ 旧 0.025 = 输入的 5%, 官方是 10%
+  'gemini-3.1-pro':       { cacheHit: 0.20,  cacheMiss: 2.0,   output: 12.0 },  // 官方 $2.00/$12.00/缓存 $0.20 ✗→✓ 旧 cacheHit 2.0 且标「无缓存折扣」→ 高估缓存读 10 倍; >200k 档 $4/$18/缓存 $0.40
+  'gemini-omni-flash':    { cacheHit: 1.5,   cacheMiss: 1.5,   output: 9.0 },   // 官方 $1.50/$9.00(text) ✚补录; 官方页**未列**缓存价 → 按输入价计, 不假设折扣(video 输出 $17.50 未建模)
+  'gemini-2.5-pro':       { cacheHit: 0.125, cacheMiss: 1.25,  output: 10.00 },  // 官方 $1.25/$10.00/缓存 $0.125; >200k 档 $2.50/$15.00/缓存 $0.25
+  'gemini-2.5-flash':     { cacheHit: 0.03,  cacheMiss: 0.3,   output: 2.5 },   // 官方 $0.30(text/图/视频; audio $1.00)/$2.50/缓存 $0.03
+  'gemini-2.5-flash-lite':{ cacheHit: 0.01,  cacheMiss: 0.10,  output: 0.40 },  // 官方 $0.10/$0.40/缓存 $0.01 ✚补录: 旧表无此键 → 落默认价, 输入高估 10 倍 / 输出高估 5 倍
+
+  // —— xAI Grok (2026-09-22 官方页 docs.x.ai/docs/pricing 的 Text API 表逐条核对, **整段补录**) ——
+  //    ⚠️ v1.4.5 之前本表**没有任何 grok 键**: 所有 grok 请求落 defaultPrices(USD $1/$2, 缓存读 $0.1),
+  //       而 grok-4.7 / 4.6 真价 $2/$6 → 输入少算 2 倍、输出少算 3 倍; grok-4.3 / 4.20 系输入输出各少算 25%。
+  //    官方口径: 每模型两档, 长上下文阈值一律 **200k tokens**(≥200k 时输入×2、输出×2、缓存×2);
+  //       本表取**主档(短上下文)**入库, 与同为 200k 阈值的 gemini-3.1-pro / gemini-2.5-pro 处理一致。
+  //    交叉验证: 官方页面内嵌机读数据 __XAI_PUBLIC_MODELS__ 的 us-east-1 / us-west-2 集群与本表逐项吻合;
+  //       其 us-central-1 集群是 US 区域端点价(= 标准 ×1.1, 目前只覆盖 4.7/4.6), 未入库。
+  //    未建模: Batch API 对 4.3 / 4.20 系有 20% 折扣; Priority Processing 一律 ×2 标准价。
+  //    未收录: 官方页现只列 grok-4.3 起的在售模型, grok-3 / grok-4 / grok-4-fast 等已不在页内 → 落默认价。
+  'grok-4.7':             { cacheHit: 0.50,  cacheMiss: 2.0,   output: 6.0 },   // 官方 $2.00/$6.00/缓存 $0.50 (500k 上限); ≥200k: $4/$12/缓存 $1
+  'grok-4.6':             { cacheHit: 0.50,  cacheMiss: 2.0,   output: 6.0 },   // 同上
+  'grok-4.5':             { cacheHit: 0.30,  cacheMiss: 2.0,   output: 6.0 },   // 官方 $2.00/$6.00/缓存 $0.30; ≥200k: $4/$12/缓存 $0.60
+  'grok-4.3':             { cacheHit: 0.20,  cacheMiss: 1.25,  output: 2.5 },   // 官方 $1.25/$2.50/缓存 $0.20 (1M 上限); ≥200k: $2.50/$5/缓存 $0.40
+  'grok-4.20':            { cacheHit: 0.20,  cacheMiss: 1.25,  output: 2.5 },   // 官方别名(等价 grok-4.20-0309-reasoning, 同价)
+  'grok-4.20-reasoning':  { cacheHit: 0.20,  cacheMiss: 1.25,  output: 2.5 },   // 官方别名; 连带 -latest / -0309 等
+  'grok-4.20-non-reasoning':       { cacheHit: 0.20, cacheMiss: 1.25, output: 2.5 },  // 官方 $1.25/$2.50/缓存 $0.20 (1M)
+  'grok-4.20-multi-agent-0309':    { cacheHit: 0.20, cacheMiss: 1.25, output: 2.5 },  // 官方 $1.25/$2.50/缓存 $0.20 (1M)
+  'grok-4.20-0309-reasoning':      { cacheHit: 0.20, cacheMiss: 1.25, output: 2.5 },  // 官方 $1.25/$2.50/缓存 $0.20 (1M)
+  'grok-4.20-0309-non-reasoning':  { cacheHit: 0.20, cacheMiss: 1.25, output: 2.5 },  // 官方 $1.25/$2.50/缓存 $0.20 (1M)
+  'grok-build-0.1':       { cacheHit: 0.20,  cacheMiss: 1.0,   output: 2.0 },   // 官方 $1.00/$2.00/缓存 $0.20 (256k); ≥200k: $2/$4/缓存 $0.40
+  'grok-code-fast-1':     { cacheHit: 0.20,  cacheMiss: 1.0,   output: 2.0 },   // grok-build-0.1 的官方别名(-1-0825 亦由安全后缀命中)
+  'grok-code-fast':       { cacheHit: 0.20,  cacheMiss: 1.0,   output: 2.0 },   // 同上(别名短名)
   // —— 国内厂商: 单位 CNY/百万tokens (原生官方价, 不要再 ÷7) ——
   // 阿里云百炼 Qwen3 (华北2/北京; help.aliyun.com/zh/model-studio/model-pricing 2026-09-10 抓取)
   //   官方上下文缓存规则: 命中按「标准输入单价 10%」计费。
@@ -868,6 +1358,10 @@ export const MODEL_PRICES = {
   'qwen3.7-plus':         { cacheHit: 0.16, cacheMiss: 1.6, output: 6.4 }, // v1.4.0: 官方限时 8 折 (原价 ¥2/¥8)
   'qwen3.7-flash':        { cacheHit: 0.02, cacheMiss: 0.2, output: 0.8 }, // v1.4.0: 官方 ¥0.2/¥0.8 (旧值 0.21/0.91 系中转站高档位, 已废)
   'qwen3.8-flash':        { cacheHit: 0.1,  cacheMiss: 0.8, output: 2.7 }, // 官方 ¥0.8/¥2.7; cacheHit ¥0.1 同 3.8-max 为控制台例外价
+  // —— 2026-09-22 官方百炼定价页 (help.aliyun.com/zh/model-studio/model-pricing) 核对后补录 ——
+  'qwen3.8-max-prime':    { cacheHit: 2.4,  cacheMiss: 24,  output: 72 },  // 官方优速模式(Prime) ¥24/¥72; 官方未单列缓存价, 按"显式缓存命中=标准输入 10%"规则推
+  'qwen3.8-omni-flash':   { cacheHit: 0.1,  cacheMiss: 0.8, output: 2.7 }, // 官方 ¥0.8/¥2.7/缓存命中 ¥0.1 (3.8 系里唯一官方单列缓存价的)
+  'qwen3.5-plus':         { cacheHit: 0.08, cacheMiss: 0.8, output: 4.8 }, // 官方 [0,128K) ¥0.8/¥4.8
   'qwen3.8-27b':          { cacheHit: 0.3,  cacheMiss: 3,   output: 12 },  // v1.4.0: 官方 ¥3/¥12; 缓存命中按官方 10% 规则 → ¥0.3 (旧值 ¥0.6 偏高 100%)
   'qwen3.6-plus':         { cacheHit: 0.2,  cacheMiss: 2,   output: 12 },  // 官方 ¥2/¥12 (256K 档 ¥8/¥48 未做分档)
   // 智谱 GLM (docs.bigmodel.cn/cn/guide/start/pricing 2026-09-10 抓取)
@@ -877,13 +1371,30 @@ export const MODEL_PRICES = {
   'glm-5.1':              { cacheHit: 2,    cacheMiss: 8,   output: 28 },  // 官方 ≥32K 档 ¥8/¥28/缓存 ¥2 ([0,32K) 档为 ¥6/¥24/¥1.3)
   'glm-5-turbo':          { cacheHit: 1.8,  cacheMiss: 7,   output: 26 },  // v1.4.0: 官方 ≥32K 档 ¥7/¥26/缓存 ¥1.8 (旧值 1.68/8.4/28 两档都不符)
   'glm-5.3-flash':        { cacheHit: 0.23, cacheMiss: 0.8, output: 2.8 }, // 官方 ¥0.8/¥2.8/缓存 ¥0.23
+  // —— 2026-09-22 官方定价页 (docs.bigmodel.cn/cn/guide/start/pricing) 逐条核对后补录 ——
+  //    分档口径 = 按**输入长度**在 32K 切开 ([0, 32K) / ≥32K); 分档模型一律取更贵的 ≥32K 档(保守)。
+  'glm-5.3-flashx':       { cacheHit: 0.57, cacheMiss: 2,   output: 7 },    // 官方 ¥2/¥7/缓存 ¥0.57 (1M)
+  'glm-5':                { cacheHit: 1.5,  cacheMiss: 6,   output: 22 },   // 官方 ≥32K 档 ¥6/¥22/缓存 ¥1.5 ([0,32K) 档为 ¥4/¥18/缓存 ¥1)
+  'glm-4.7':              { cacheHit: 0.8,  cacheMiss: 4,   output: 16 },   // 官方 [32K,200K) 档 ¥4/¥16/缓存 ¥0.8 (低档 ¥2~3/¥8~14)
+  'glm-4.7-flashx':       { cacheHit: 0.1,  cacheMiss: 0.5, output: 3 },    // 官方 ¥0.5/¥3/缓存 ¥0.1 (200K)
+  'glm-4.5-air':          { cacheHit: 0.24, cacheMiss: 1.2, output: 8 },    // 官方 [32K,128K) 档 ¥1.2/¥8/缓存 ¥0.24
+  'glm-4-air-250414':     { cacheHit: 0.25, cacheMiss: 0.5, output: 0.5 },  // 官方 ¥0.5/¥0.5/缓存 ¥0.25
+  'glm-4-long':           { cacheHit: 0.5,  cacheMiss: 1,   output: 1 },    // 官方 ¥1/¥1/缓存 ¥0.5 (1M)
+  // ⚠️ 这一条同时修掉一个键名错配: 原来 'glm-4-flashx-250414' 没有任何键能收它(旧值 0.05/0.1/0.1 被挂在
+  //    'glm-4-flash' 上), 而官方 GLM-4-Flash-250414 其实是**免费**、GLM-4-FlashX-250414 才是 ¥0.1/¥0.1/缓存 ¥0.05。
+  //    'glm-4-flashx' 比 'glm-4-flash' 长, matchModelPrice 取最长键 → FlashX 现在能命中自己的价。
+  'glm-4-flashx':         { cacheHit: 0.05, cacheMiss: 0.1, output: 0.1 },  // 官方 GLM-4-FlashX-250414 ¥0.1/¥0.1/缓存 ¥0.05
   // Kimi / Moonshot (platform.kimi.com/docs/pricing/* 2026-09-10 抓取, 均 CNY)
   'kimi-k3':              { cacheHit: 2,    cacheMiss: 20,  output: 100 }, // v1.4.0: 官方 ¥2/¥20/¥100 (旧值全线 +5%)
   'kimi-k2.7-code':       { cacheHit: 1.3,  cacheMiss: 6.5, output: 27 },  // 官方 ¥1.3/¥6.5/¥27
   'kimi-k2.7-code-highspeed': { cacheHit: 2.6, cacheMiss: 13, output: 54 },// v1.4.0 新增: 官方高速版 ¥2.6/¥13/¥54
   'kimi-k2.6':            { cacheHit: 1.1,  cacheMiss: 6.5, output: 27 },  // v1.4.0: 官方缓存命中 ¥1.1 (旧值误抄成 k2.7-code 的 ¥1.3)
-  'kimi-k2.5':            { cacheHit: 0.679, cacheMiss: 3.864, output: 20.279 }, // ⚠️ 未核实: 官方页未列(历史款), 由 v1.3.4 USD 值 ×7 保号迁移
-  // 字节豆包 Seed (火山方舟; ⚠️ 官方页是 SPA, v1.4.0 未能取到原文 → ×7 保号迁移, 未核实)
+  // ⚠️ 官方已于 **2026-08-31 全平台下线** (platform.kimi.com/docs/models.md, 调用返回 404), 官方无价目。
+  //    值仍为 v1.3.4 的 USD×7 保号迁移, **非官方价**, 仅作旧会话估算占位 —— 2026-09-22 复核确认下线, 未能取证。
+  'kimi-k2.5':            { cacheHit: 0.679, cacheMiss: 3.864, output: 20.279 },
+  // 字节豆包 Seed —— ⚠️ 2026-09-22 复核: 火山方舟官方文档/定价页都是 SPA, fetch 只拿到壳(0 表),
+  //   而本容器内 chromium 无网络(无法渲染), 故**仍未能取证**。下列值仍是 v1.3.4 的 ×7 保号迁移, **非官方价**。
+  //   取证路径: 用带网络的浏览器打开 volcengine.com/docs/82379/1544106 抄表后回填。
   'doubao-seed-2.0-pro-32k':   { cacheHit: 0.616, cacheMiss: 3.087, output: 15.449 },
   'doubao-seed-2.0-pro-128k':  { cacheHit: 0.924, cacheMiss: 4.634, output: 23.17 },
   'doubao-seed-2.0-pro-256k':  { cacheHit: 1.855, cacheMiss: 9.268, output: 46.347 },
@@ -902,19 +1413,36 @@ export const MODEL_PRICES = {
   // MiniMax (platform.minimaxi.com/docs/guides/pricing-paygo 2026-09-10 抓取)
   'minimax-m2.7':           { cacheHit: 0.42, cacheMiss: 2.1, output: 8.4 },  // v1.4.0 修复: 官方缓存读 ¥0.42 (旧值拿 cacheMiss ¥2.1 顶替 → 长会话高估 5 倍, 同 AGENTS.md 红线 4)
   'minimax-m2.7-highspeed': { cacheHit: 0.42, cacheMiss: 4.2, output: 16.8 }, // v1.4.0 新增: 官方高速版
+  'minimax-m3':             { cacheHit: 0.42, cacheMiss: 2.1, output: 8.4 },  // 2026-09-22 官方"永久五折" ≤512k 输入档 ¥2.1/¥8.4/缓存 ¥0.42 (>512k 档 ¥4.2/¥16.8/缓存 ¥0.84)
   // 美团 LongCat (中转站实测; 官方页未取到明文)
   'longcat-2.0':          { cacheHit: 0.1,  cacheMiss: 5,   output: 20 },  // 实测 ¥5/¥20/缓存 ¥0.1
-  // 腾讯混元 (⚠️ 官方页是 SPA, v1.4.0 未能取到原文 → ×7 保号迁移, 未核实)
+  // 腾讯混元 —— ⚠️ 2026-09-22 复核: 官方计费页 (cloud.tencent.com/document/product/1729/97731) 与模型列表里
+  //   **均无以下三个 API 名** (官方现役计费项为 Hunyuan-a13b / hunyuan-role-latest / hunyuan-translation /
+  //   Tencent HY Vision 1.5 Instruct 等), 无从对照 → 下列值仍是 v1.3.4 的 ×7 保号迁移, **非官方价**。
+  //   若确认是历史名/中转站命名, 可整段删除; 现在保留只为老会话估算不断档。
   'hunyuan-2.0-instruct-128k': { cacheHit: 4.347, cacheMiss: 4.347, output: 10.745 },
   'hunyuan-2.0-think-128k':    { cacheHit: 5.117, cacheMiss: 5.117, output: 20.468 },
   'hunyuan-turbo-s':           { cacheHit: 0.77,  cacheMiss: 0.77,  output: 1.932 },
   // 阶跃星辰 (platform.stepfun.com/docs/zh/guides/pricing/details 2026-09-10 抓取)
   'step-3.7-flash':       { cacheHit: 0.27, cacheMiss: 1.35, output: 8.1 }, // 官方 ¥1.35/¥8.1/缓存 ¥0.27
   'step-3.5-flash':       { cacheHit: 0.14, cacheMiss: 0.7,  output: 2.1 }, // 官方 ¥0.7/¥2.1/缓存 ¥0.14
+  'step-5-preview':       { cacheHit: 0.35, cacheMiss: 7,    output: 20 },  // 2026-09-22 官方新增 ¥7/¥20/缓存 ¥0.35
+  'step-1o-turbo-vision': { cacheHit: 0.5,  cacheMiss: 2.5,  output: 8 },   // 2026-09-22 官方 ¥2.5/¥8/缓存 ¥0.5
   // 小米 MiMo — 官方 2026-05-27 起「永久降价」(最高降幅 99%), 取消上下文分档; 与中转站 tokenrhythm 实时报价一致。
   // v1.3.4 修的「除两次 7」结论正确, v1.4.0 起改为直接存官方 CNY 原值, 不再有 ÷7 环节。
-  'mimo-v2.5':            { cacheHit: 0.02,  cacheMiss: 1, output: 2 },    // 官方 ¥1/¥2/缓存 ¥0.02
-  'mimo-v2.5-pro':        { cacheHit: 0.025, cacheMiss: 3, output: 6 },    // 官方 ¥3/¥6/缓存 ¥0.025
+  // —— 2026-09-22 官方按量付费页 (platform.xiaomimimo.com/docs/zh-CN/price/pay-as-you-go) 逐条核对 ——
+  //    V2.6 系列于当日发布(官方 updates/model 页 2026-09-22「模型发布」), 与 V2.5 系**同价**(实时推理档)。
+  //    ✚补录 3 条: 此前表内无任何 v2.6 键 → 全部落 defaultPrices(USD $1/$2), 按国内口径换算后为 ¥7/¥14,
+  //      即 v2.6-pro 高估 2.33 倍、v2.6-flash 高估 7 倍。
+  //    ⚠️ V2.5 系官方下线公告 (updates/deprecate): **北京时间 2026-10-21 10:00 直接下线, 无系统替换模型** —
+  //       保留其键仅供旧会话估算, 到期后新调用会失败, 别再把新流量算作 v2.5。
+  //    未建模: 批量推理档(v2.6-pro ¥1.5/¥3、v2.6-flash ¥0.5/¥1)、mimo-v2.5-asr(按音频时长 ¥0.5/小时)、
+  //       国内联网服务(¥16/1000 次); 官方另有 USD 表($0.435/$0.87 等), 按「原生币种存储」规则本表只用 CNY 表。
+  'mimo-v2.6-pro':        { cacheHit: 0.025, cacheMiss: 3, output: 6 },    // 官方实时推理 ¥3/¥6/缓存 ¥0.025 (与 v2.5-pro 同价)
+  'mimo-v2.6-flash':      { cacheHit: 0.02,  cacheMiss: 1, output: 2 },    // 官方实时推理 ¥1/¥2/缓存 ¥0.02 (与 v2.5 同价)
+  'mimo-v2.6-pro-ultraspeed': { cacheHit: 0.25, cacheMiss: 30, output: 60 },  // 官方 ¥30/¥60/缓存 ¥0.25 (旗舰性能 + 最高 20 倍推理速度)
+  'mimo-v2.5':            { cacheHit: 0.02,  cacheMiss: 1, output: 2 },    // 官方 ¥1/¥2/缓存 ¥0.02 ⚠️ 2026-10-21 10:00 下线
+  'mimo-v2.5-pro':        { cacheHit: 0.025, cacheMiss: 3, output: 6 },    // 官方 ¥3/¥6/缓存 ¥0.025 ⚠️ 2026-10-21 10:00 下线
   // —— 以下为历史/参考模型 (2025-08, 实际以平台为准) ——
   // 币种规则同上: 海外的写 USD, 国内的写 CNY。
   // 🔴 v1.4.0 重要修复: 本段「国内」条目历来填的是**官方 CNY 原值**(不是 ÷7 后的 USD),
@@ -933,7 +1461,9 @@ export const MODEL_PRICES = {
   'claude-3-5-sonnet':    { cacheHit: 0.3,   cacheMiss: 3,    output: 15 },
   'claude-3-5-haiku':     { cacheHit: 0.08,  cacheMiss: 0.8,  output: 4 },
   'claude-3-opus':        { cacheHit: 1.5,   cacheMiss: 15,   output: 75 },
-  // Gemini — v1.4.0 修正: 缓存读 = 输入 ×25% (Gemini 官方 75% off 口径)。旧值 50% 偏高。
+  // Gemini 历史条目 — ⚠️ 2026-09-22 复核: 官方定价页现**已不列** 2.0 / 1.5 全系(页面自 Gemini 2.5 起),
+  //    故这三条的「缓存读 = 输入 ×25%」口径**无法取证**, 原样保留仅作旧会话估算占位, **非官方现价**。
+  //    现役 Gemini 3.x / 2.5 官方页一律「缓存读 = 输入 ×10%」(2026-09-22 逐条吻合) —— 历史 25% 口径勿再套用到新条目。
   'gemini-2.0-flash':     { cacheHit: 0.025, cacheMiss: 0.1,  output: 0.4 },
   'gemini-2.0-pro':       { cacheHit: 0.625, cacheMiss: 2.5,  output: 10 },
   'gemini-1.5-pro':       { cacheHit: 0.875, cacheMiss: 3.5,  output: 10.5 },
@@ -949,15 +1479,20 @@ export const MODEL_PRICES = {
   'glm-4-plus':           { cacheHit: 2.5,   cacheMiss: 5,    output: 5 },  // ✅ v1.4.0 修复: 官方 ¥2.5/¥5/¥5 (旧口径下显示 ¥17.5/¥35/¥35, 高 7 倍)
   'glm-4-flash':          { cacheHit: 0.05,  cacheMiss: 0.1,  output: 0.1 }, // ⚠️ 官方 GLM-4-Flash-250414 现为免费; 此处保留历史 ¥0.1 档(宁高不低, 中转站可能仍计费)
   // 通义千问 (官方 CNY; 2026-09-10 抓取)
-  'qwen-plus':            { cacheHit: 0.4,   cacheMiss: 0.8,  output: 2 },  // 官方 ¥0.8/¥2 ✅; ⚠️ cacheHit 0.4(=50%) 未核实
+  'qwen-plus':            { cacheHit: 0.08,  cacheMiss: 0.8,  output: 2 },  // 官方 ¥0.8/¥2 ✅ (2026-09-22 核对: 现役 qwen-plus-2025-01-25 无阶梯计价);
+  //   ⚠️ cacheHit 原值 0.4(=输入 50%) **无官方依据** —— 官方明文「显式缓存命中按标准输入单价的 10% 计费」,
+  //   同表其余 8 个 qwen 条目也都严格等于 10%, 只有 qwen-plus / qwen-turbo 是 50% → 已按官方规则改为 0.08 (旧值高估缓存读 5 倍)。
   'qwen-max':             { cacheHit: 0.24,  cacheMiss: 2.4,  output: 9.6 },// v1.4.0: 官方现价 ¥2.4/¥9.6 (旧值 20/60 是远古价)
-  'qwen-turbo':           { cacheHit: 0.15,  cacheMiss: 0.3,  output: 0.6 },// 官方 ¥0.3/¥0.6 ✅; ⚠️ cacheHit 未核实
-  'qwen2.5-72b-instruct': { cacheHit: 2,     cacheMiss: 4,    output: 12 }, // 官方 ¥4/¥12 ✅
-  // Kimi — ⚠️ 未核实: 官方页未列旧款, 且这些值与 Moonshot 官方历史价(¥12/¥12 一档)对不上, 待重新取证
+  'qwen-turbo':           { cacheHit: 0.03,  cacheMiss: 0.3,  output: 0.6 },// 官方 ¥0.3/¥0.6 (思考模式输出 ¥3) ✅; cacheHit 同上按官方 10% 规则改为 0.03 (旧值 0.15=50%)
+  'qwen2.5-72b-instruct': { cacheHit: 2,     cacheMiss: 4,    output: 12 }, // ⚠️ 官方 2026-05-13 已下线(百炼下线公告), 保留仅为旧会话估算占位
+  // Kimi — ⚠️ 官方 **2026-08-31 已全平台下线 moonshot-v1 全系** (调用 404), 官方价目已撤, 无法取证。
+  //    下列值与原 Moonshot 官方历史价(¥12/¥12 一档)对不上, 仅作旧会话估算占位, 别当官方价引用。
   'moonshot-v1-8k':       { cacheHit: 0.6,   cacheMiss: 1.2,  output: 2.4 },
   'moonshot-v1-32k':      { cacheHit: 1.2,   cacheMiss: 2.4,  output: 4.8 },
   'moonshot-v1-128k':     { cacheHit: 3,     cacheMiss: 6,    output: 12 },
-  // 阶跃星辰 — ⚠️ 未核实: 官方页未列旧款
+  // 阶跃星辰 —— ⚠️ 2026-09-22 复核: 官方定价页现仅列 step-5-preview / step-3.7-flash / step-3.5-flash(-2603)
+  //   / step-1o-turbo-vision 与音频系列, **无下列 step-1-flash / step-1-8k / step-1-32k**(历史款),
+  //   官方无从对照, 值仍为旧存留, **非当前官方价**。
   'step-1-flash':         { cacheHit: 0.5,   cacheMiss: 1,    output: 2 },
   'step-1-8k':            { cacheHit: 2,     cacheMiss: 4,    output: 8 },
   'step-1-32k':           { cacheHit: 4,     cacheMiss: 8,    output: 15 },
@@ -1001,9 +1536,13 @@ export const nativeCurrencyOf = (model) => (modelRegion(model) === '海外' ? 'U
  * 默认配置(国内 CNY / 海外 USD)下两边同币种, 根本不走换算 —— 这正是 v1.4.0 想达到的效果。
  */
 const convertPrice = (price, from, to) => {
-  if (from === to) return { cacheHit: price.cacheHit, cacheMiss: price.cacheMiss, output: price.output }
+  // v1.5.0: cacheWrite 是**可选**档 (官方 Anthropic/阿里 = 输入 ×125%) —— 必须一并带过,
+  //   否则会被这里静默丢掉, 缓存写入就退化成按 cacheMiss 计 (这正是 T14 第一次没测过的原因)。
+  const cw = price.cacheWrite
+  const withCw = (o) => (cw !== undefined ? { ...o, cacheWrite: cw } : o)
+  if (from === to) return withCw({ cacheHit: price.cacheHit, cacheMiss: price.cacheMiss, output: price.output })
   const k = from === 'USD' ? USD_TO_CNY_RATE : 1 / USD_TO_CNY_RATE
-  return { cacheHit: price.cacheHit * k, cacheMiss: price.cacheMiss * k, output: price.output * k }
+  return withCw({ cacheHit: price.cacheHit * k, cacheMiss: price.cacheMiss * k, output: price.output * k })
 }
 
 /**
@@ -1044,7 +1583,7 @@ const matchModelPrice = (model) => {
 }
 
 /** 解析模型单价, 仅 deepseek-flash / deepseek-v4-* 支持峰谷自动切换; chat/reasoner 等走通用价格表 */
-export const resolveModelPrice = (configOrGetter, model, timestamp = Date.now()) => {
+export const resolveModelPrice = (configOrGetter, model, timestamp = Date.now(), phase = null) => {
   const config = typeof configOrGetter === 'function' ? configOrGetter() : configOrGetter
   const peak = isPeakTime(timestamp)
   const display = currencyForModel(config, model)
@@ -1062,7 +1601,10 @@ export const resolveModelPrice = (configOrGetter, model, timestamp = Date.now())
   if (typeof model === 'string' && (model.startsWith('deepseek-v4') || model.startsWith('deepseek-flash'))) {
     const table = V4_RATES[display] ?? V4_RATES.CNY
     const key = model.startsWith('deepseek-v4-pro') ? 'deepseek-v4-pro' : 'deepseek-flash'
-    const hit = (peak ? table.peak[key] : table.offPeak[key])
+    // v1.5.0 峰谷分相: phase 显式给出时以它为准(历史上的每笔消耗按各自发生时刻计价),
+    //   为 null 才回退到「按 timestamp 判定」的老行为 —— 默认参数保持向后兼容。
+    const usePeak = phase === 'peak' ? true : phase === 'offPeak' ? false : peak
+    const hit = (usePeak ? table.peak[key] : table.offPeak[key])
     if (hit) return { ...hit }
   }
 
@@ -1076,15 +1618,9 @@ export const resolveModelPrice = (configOrGetter, model, timestamp = Date.now())
   return convertPrice(config?.defaultPrices ?? { cacheHit: 0.1, cacheMiss: 1, output: 2 }, 'USD', display)
 }
 
-/** 通用 fetch 请求, 带超时。 */
+/** 超时覆盖响应头和后续 body 读取，避免慢响应体卡死整轮刷新。 */
 async function fetchWithTimeout(url, headers, timeoutMs, method = 'GET') {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    return await fetch(url, { method, headers, signal: controller.signal })
-  } finally {
-    clearTimeout(timer)
-  }
+  return fetch(url, { method, headers, signal: AbortSignal.timeout(timeoutMs) })
 }
 
 /** 读取请求体并限制大小 (默认 256KB) —— 防持有 token 者灌大包打爆内存。超限抛错。 */
@@ -1122,38 +1658,76 @@ const cleanUrl = (value) => {
  */
 export const PLATFORM_PRESETS = [
   // ===== 国内平台（有公开余额/配额查询接口）=====
+  // ⚠️ consoleUrl = 「去充值」跳的地址。证据等级写在行尾注释里, 三种, **不要混着说**:
+  //    已核实 = 官方 FAQ/帮助页正文直链该 URL 且实测可达
+  //    未核实 = 无官方直链, 但实测该路径被系统接受(302 到登录页并把路径留在 redirect 里)
+  //    仅首页 = 拿不到充值路径, 只填一级域名/控制台首页; 再差就留空(宁缺毋滥, 别联想路径)
   { id: 'deepseek', label: 'DeepSeek', icon: 'deepseek', color: '#4D6BFE', category: '国内',
-    baseUrl: 'https://api.deepseek.com', queryType: 'deepseek', envKeys: ['DEEPSEEK_API_KEY'] },
+    baseUrl: 'https://api.deepseek.com', queryType: 'deepseek', envKeys: ['DEEPSEEK_API_KEY', 'DSHA_DEEPSEEK_OFFICIAL_API_KEY'],
+    consoleUrl: 'https://platform.deepseek.com/top_up' },                    // 已核实
   { id: 'zhipu', label: '智谱 GLM', icon: 'zhipu', color: '#3859FF', category: '国内',
     // v0.5.5: 实测余额监控接口在 open.bigmodel.cn (api.z.ai 同路径 401); 补 ZAI_CODING_CN 等 key 别名
-    baseUrl: 'https://open.bigmodel.cn', queryType: 'glm', envKeys: ['ZHIPU_API_KEY', 'GLM_API_KEY', 'BIGMODEL_API_KEY', 'ZAI_CODING_CN_API_KEY', 'ZAI_API_KEY'] },
+    baseUrl: 'https://open.bigmodel.cn', queryType: 'glm', envKeys: ['ZHIPU_API_KEY', 'GLM_API_KEY', 'BIGMODEL_API_KEY', 'ZAI_CODING_CN_API_KEY', 'ZAI_API_KEY'],
+    consoleUrl: 'https://open.bigmodel.cn/finance/overview' },               // 已核实(官方 FAQ「财务总览」直链)
   { id: 'moonshot', label: 'Kimi Moonshot', icon: 'moonshot', color: '#000000', category: '国内',
-    baseUrl: 'https://api.moonshot.cn', queryType: 'kimi', envKeys: ['MOONSHOT_API_KEY', 'KIMI_API_KEY'] },
+    baseUrl: 'https://api.moonshot.cn', queryType: 'kimi', envKeys: ['MOONSHOT_API_KEY', 'KIMI_API_KEY'],
+    consoleUrl: 'https://platform.kimi.com/console/pay' },                   // 未核实(/console/recharge 是 404, 这个 200)
   { id: 'stepfun', label: '阶跃星辰 StepFun', icon: 'mistral', color: '#FA520F', category: '国内',
-    baseUrl: 'https://api.stepfun.com', queryType: 'stepfun', envKeys: ['STEPFUN_API_KEY'] },
+    baseUrl: 'https://api.stepfun.com', queryType: 'stepfun', envKeys: ['STEPFUN_API_KEY'],
+    consoleUrl: 'https://platform.stepfun.com/' },                           // 仅首页(/finance /account 全 404)
   { id: 'siliconflow', label: '硅基流动', icon: 'siliconflow', color: '#6E29F6', category: '国内',
-    baseUrl: 'https://api.siliconflow.cn', queryType: 'siliconflow', envKeys: ['SILICONFLOW_API_KEY', 'SILICON_API_KEY'] },
+    baseUrl: 'https://api.siliconflow.cn', queryType: 'siliconflow', envKeys: ['SILICONFLOW_API_KEY', 'SILICON_API_KEY'],
+    consoleUrl: 'https://cloud.siliconflow.cn/account/charge' },             // 未核实(302 到登录页且保留该路径)
   { id: 'minimax', label: 'MiniMax', icon: 'minimax', color: '#E73562', category: '国内',
-    baseUrl: 'https://api.minimaxi.com', queryType: 'minimax', envKeys: ['MINIMAX_API_KEY'] },
+    baseUrl: 'https://api.minimaxi.com', queryType: 'minimax', envKeys: ['MINIMAX_API_KEY'],
+    consoleUrl: 'https://platform.minimaxi.com/user-center/payment/balance' }, // 已核实(官方账号文档同路径)
 
   // ===== 海外平台（有公开余额/配额查询接口）=====
   { id: 'openrouter', label: 'OpenRouter', icon: 'openrouter', color: '#6469FF', category: '海外',
-    baseUrl: 'https://openrouter.ai', queryType: 'openrouter', envKeys: ['OPENROUTER_API_KEY'] },
+    baseUrl: 'https://openrouter.ai', queryType: 'openrouter', envKeys: ['OPENROUTER_API_KEY'],
+    consoleUrl: 'https://openrouter.ai/settings/credits' },                  // 已核实(官方 FAQ 直链)
   { id: 'novita', label: 'Novita AI', icon: 'together', color: '#FA520F', category: '海外',
-    baseUrl: 'https://api.novita.ai', queryType: 'novita', envKeys: ['NOVITA_API_KEY'] },
+    baseUrl: 'https://api.novita.ai', queryType: 'novita', envKeys: ['NOVITA_API_KEY'],
+    consoleUrl: 'https://novita.ai/billing/payment-methods' },               // 已核实(官方 Payment Methods 文档直链)
   { id: 'xai', label: 'xAI Grok', icon: 'xai', color: '#000000', category: '海外',
-    baseUrl: 'https://api.x.ai', queryType: 'openai', envKeys: ['XAI_API_KEY'] },
+    baseUrl: 'https://api.x.ai', queryType: 'openai', envKeys: ['XAI_API_KEY'],
+    consoleUrl: 'https://console.x.ai/team/default/billing' },                 // 已核实(官方 Manage Billing 文档直链; team/default 为占位段)
 
   // ===== 著名模型品牌 (无公开余额接口, 仅显示模型 + 按价格表估算消耗) =====
-  { id: 'openai', label: 'OpenAI', icon: 'openai', color: '#10A37F', category: '海外', noBalance: true },
-  { id: 'claude', label: 'Anthropic Claude', icon: 'claude', color: '#D97757', category: '海外', noBalance: true },
+  // 这些平台查不到余额, 但更要紧的是让用户点得到充值页 —— 余额红着脸却找不到入口最难受。
+  { id: 'openai', label: 'OpenAI', icon: 'openai', color: '#10A37F', category: '海外', noBalance: true,
+    consoleUrl: 'https://platform.openai.com/settings/organization/billing' }, // 未核实(官方页 403, 路径来自同类插件)
+  { id: 'claude', label: 'Anthropic Claude', icon: 'claude', color: '#D97757', category: '海外', noBalance: true,
+    consoleUrl: 'https://platform.claude.com/settings/billing' },              // 已核实(support.claude.com 帮助文直链)
   { id: 'gemini', label: 'Google Gemini', icon: 'gemini', color: '#4285F4', category: '海外',
-    baseUrl: 'https://generativelanguage.googleapis.com', queryType: 'gemini', envKeys: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'] },
-  { id: 'qwen', label: '通义千问 Qwen', icon: 'qwen', color: '#623AE7', category: '国内', noBalance: true },
-  { id: 'mimo', label: '小米 MiMo', icon: 'mimo', color: '#FF6900', category: '国内', noBalance: true },
+    baseUrl: 'https://generativelanguage.googleapis.com', queryType: 'gemini', envKeys: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+    consoleUrl: 'https://aistudio.google.com/billing' },                       // 已核实(官方 Gemini API billing 文档「AI Studio Billing page」直链)
+  { id: 'qwen', label: '通义千问 Qwen', icon: 'qwen', color: '#623AE7', category: '国内', noBalance: true,
+    consoleUrl: 'https://billing-cost.console.aliyun.com/fortune/fund-management/recharge' }, // 已核实(阿里云官方帮助文直链)
+  { id: 'mimo', label: '小米 MiMo', icon: 'mimo', color: '#FF6900', category: '国内', noBalance: true,
+    consoleUrl: 'https://platform.xiaomimimo.com/#/console/recharge' },        // 已核实(官方 recharge 公告页)
   // v1.2.1: 豆包/混元入列模型品牌分组 (价格表 v1.2.0 已覆盖, 此前只算价不显示)
-  { id: 'doubao', label: '豆包 Seed', icon: 'doubao', color: '#3C8CFF', category: '国内', noBalance: true },
-  { id: 'hunyuan', label: '腾讯混元', icon: 'hunyuan', color: '#0052D9', category: '国内', noBalance: true },
+  { id: 'doubao', label: '豆包 Seed', icon: 'doubao', color: '#3C8CFF', category: '国内', noBalance: true,
+    consoleUrl: 'https://console.volcengine.com/finance/recharge/' },          // 未核实(302 到登录页且保留该路径)
+  { id: 'hunyuan', label: '腾讯混元', icon: 'hunyuan', color: '#0052D9', category: '国内', noBalance: true,
+    consoleUrl: 'https://console.cloud.tencent.com/account/recharge' },        // 未核实(302 到登录页且保留该路径)
+
+  // ===== v1.6.0: 又一批「查不到余额、但查到了官方充值入口」的平台 =====
+  // 地址全部来自官方文档/帮助页**正文直链**（2026-09-27 逐条核实，含假路径对照以排除 SPA 万能兜底）。
+  { id: 'groq', label: 'Groq', icon: 'groq', color: '#F55036', category: '海外', noBalance: true,
+    consoleUrl: 'https://console.groq.com/settings/billing/manage' },          // 已核实(官方 Billing FAQ 直链)
+  { id: 'mistral', label: 'Mistral', icon: 'mistral', color: '#FA520F', category: '海外', noBalance: true,
+    consoleUrl: 'https://admin.mistral.ai/organization/billing' },             // 已核实(官方 Billing 文档「Open Billing」直链)
+  { id: 'together', label: 'Together AI', icon: 'together', color: '#0F6FFF', category: '海外', noBalance: true,
+    consoleUrl: 'https://api.together.ai/settings/billing' },                  // 已核实(官方帮助中心 Credit Packs 直链)
+  { id: 'deepinfra', label: 'DeepInfra', icon: 'deepinfra', color: '#00A67E', category: '海外', noBalance: true,
+    consoleUrl: 'https://deepinfra.com/dash/billing' },                        // 已核实(页面确为账单页 + 官方 API 文档佐证)
+  { id: 'fireworks', label: 'Fireworks AI', icon: 'fireworks', color: '#FF5C1A', category: '海外', noBalance: true,
+    consoleUrl: 'https://fireworks.ai/billing' },                              // 已核实(官方 quotas 文档直链 → app.fireworks.ai/account/billing)
+  { id: 'perplexity', label: 'Perplexity', icon: 'perplexity', color: '#20808D', category: '海外', noBalance: true,
+    consoleUrl: 'https://console.perplexity.ai/project/billing' },             // 已核实(官方文档 Card + FAQ 正文直链)
+  { id: 'longcat', label: '美团 LongCat', icon: 'longcat', color: '#F5C518', category: '国内', noBalance: true,
+    consoleUrl: 'https://longcat.chat/platform/cost/recharge?tab=api' },       // 已核实(官方文档正文直链)
 ]
 
 // ============================================================
@@ -1175,6 +1749,14 @@ export const Config = Schema.object({
   customRelays: Schema.array(RelaySchema).default([]),
   /** 安全阈值: 余额 > safe 显示绿色, > warn 黄色, 否则红色 */
   safeThreshold: Schema.number().min(0).default(50),
+  /** v1.6.2: 今日花销提醒阈值(主币种), 超过就弹一次「老大，今天花销已经超过 ¥# 啦」。0 = 关闭。 */
+  dailyLimit: Schema.number().min(0).default(0),
+  /**
+   * v1.6.8: **重复提醒间隔(小时)** —— 余额停在预警档(黄/红)时, 每隔这么久再提醒一次。
+   * 0 = 关闭(只在刚跌破/跨档时提醒一次, 即 v1.6.7 及更早的行为)。默认 6 小时。
+   * 为什么加: 真机反馈「错过那一条就彻底安静了」—— 跨档只发一条的设计在手机上太容易漏。
+   */
+  alertRepeatHours: Schema.number().min(0).max(168).default(6),
   warnThreshold: Schema.number().min(0).default(10),
   /** 计价货币 */
   currency: Schema.string().default('CNY'),
@@ -1199,6 +1781,7 @@ export const Config = Schema.object({
   whaleEnabled: Schema.boolean().default(false),
   /** 显示无余额模型品牌 (OpenAI/Claude/Gemini/Qwen/MiMo), 默认关闭 */
   showNoBalanceBrands: Schema.boolean().default(false),
+  showSubagentCapsules: Schema.boolean().default(true),
   /** 官方直连 provider 名单 (第 1 层判定, 最高优先级)。
    *  写在这里的 provider 名一律按「官方直连」处理, 状态条显示官方余额;
    *  没写的按 baseURL 域名 / `-official` 后缀自动判定, 都不命中则按中转站显示「—」。 */
@@ -1227,42 +1810,208 @@ export const Config = Schema.object({
 // ============================================================
 let lastAlertState = {}
 
+// --- 余额告警通道 (v1.4.6, 修 issue #2 问题 3) ------------------------------
+// 旧实现的两条通道在 DSH >= 0.1.5 上都不存在:
+//   ① ctx.notify —— cordis 的 notify 挂在 ctx.reflect 上, 语义是"重估依赖某服务的 fiber",
+//      不是通知 API; ctx 上根本没有 notify 方法。
+//   ② ctx.get('webServer').notify —— dsh-host-webserver 的服务面只有
+//      register / registerUpgrade / registerFallback / tapIndex / renderIndex, **没有 notify**
+//      (0.1.5 起如此, 0.1.7-rc.2 复核仍如此)。
+// → 两个分支都落空, 告警被 try/catch 静默吞掉: 作者以为会通知, 用户从未收到。
+//
+// 现改走 DSHA App 桥 —— 与 dsh-task-notifier 同一条链路, 是当前真正能弹通知的通道:
+//   GET http://127.0.0.1:3090/app/notify?title=&text= (凭据放 X-Token 请求头)
+// token 读 $DSH_HOME/.bridge_token。拿不到通道时不再只"静默": alertStatus.channel 记 'none',
+// 由 /api-dashboard/alerts 暴露给设置面板做可见降级 (issue #2 点名要求这一点)。
+const ALERT_BRIDGE_URL = 'http://127.0.0.1:3090/app/notify'
+// v1.6.8: App **在前台**时 /app/notify 会回 FOREGROUND_SKIP(真机实测), 这时改发 App 内提示。
+// 这条通道是 2026-09-29 真机验证过的: 前台 toast = OK, 前台 notify = FOREGROUND_SKIP, 后台 notify = OK。
+const ALERT_BRIDGE_TOAST = 'http://127.0.0.1:3090/app/toast'
+// v1.5.1: 探测通道只用**只读**的 /app/version —— 不拿 /app/notify 去试,
+// 那会在用户手机上真弹一条通知来"测通知", 很讨嫌。
+const ALERT_BRIDGE_PROBE = 'http://127.0.0.1:3090/app/version'
+/** v1.6.8: 重复提醒间隔(小时) 消毒 —— 非法/≤0 一律 0(关闭), 超上限夹到上限。纯函数, 便于单测。 */
+export const clampAlertRepeatHours = (v) => {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return 0
+  return Math.min(Math.round(n), ALERT_REPEAT_MAX_HOURS)
+}
+
+/**
+ * v1.6.8: 桥的响应 → 投递结果。
+ *   'delivered'       —— 真的进了通知栏
+ *   'foreground-skip' —— App 在前台, 桥主动跳过(200 + `{"result":"FOREGROUND_SKIP"}`)
+ *   'failed'          —— 其它(非 2xx / 认不出的响应体)
+ *
+ * ⚠️ **只看 `resp.ok` 是不够的** —— FOREGROUND_SKIP 也是 200。旧实现把它计入 sent,
+ * 于是设置面板显示「通道可用 / 已发送」, 用户屏幕上却什么都没有: 2026-09-29 真机那条
+ * 15:30 的余额告警就是这么"消失"的(排查时被这个假成功带偏到系统设置方向)。
+ */
+export const classifyBridgeReply = (status, body) => {
+  if (!(typeof status === 'number' && status >= 200 && status < 300)) return 'failed'
+  const text = typeof body === 'string' ? body : ''
+  if (text.includes('FOREGROUND_SKIP')) return 'foreground-skip'
+  if (text.includes('"result":"OK"')) return 'delivered'
+  return 'failed'
+}
+
+/**
+ * v1.6.8: 告警触发判定 —— 纯函数, 便于单测。
+ *   ① 跨档(level 与上次不同, 且新档非 ok) → 'cross', 立即提醒
+ *   ② 停在同一个低档 + 距上次提醒已过 repeatMs → 'repeat', 冷却重发
+ *      (repeatMs = 0 表示不重发, 即 v1.6.7 及更早的「只提醒一次」行为)
+ * ⚠️ prev 为空(进程刚起来、且状态文件里没有记录)按**跨档**处理: 相当于重新上膛,
+ *   否则重启后余额已经很低却永远不提醒。
+ * @param prev {{level?: string, at?: number}|undefined} 上一次的档位与提醒时刻
+ * @param level {'ok'|'warn'|'err'} 本次档位
+ * @param now {number} 当前时间戳
+ * @param repeatMs {number} 重复提醒间隔(毫秒), 0 = 关闭
+ * @returns {'cross'|'repeat'|null}
+ */
+export const planAlert = (prev, level, now, repeatMs) => {
+  if (level !== 'warn' && level !== 'err') return null
+  const prevLevel = prev && typeof prev === 'object' ? prev.level : undefined
+  if (prevLevel !== level) return 'cross'
+  const at = prev && Number.isFinite(prev.at) ? prev.at : 0
+  if (!(repeatMs > 0)) return null
+  return now - at >= repeatMs ? 'repeat' : null
+}
+
+const alertStatus = {
+  channel: 'unknown',   // 'unknown' | 'app-bridge' | 'none'
+  checkedAt: 0,
+  last: null,
+  sent: 0,              // 真的进了通知栏
+  skipped: 0,           // App 在前台被跳过 → 改发 App 内提示且成功
+  failed: 0,
+  lastDelivery: null,   // 'notify' | 'toast' | 'failed'
+}
+// 探测只做一次(通道在进程生命周期内不会变), 失败也不重试 —— 别拿用户的面板开启时机做重试循环
+let alertChannelProbed = false
+
+/** 读 3090 桥 token; 拿不到返回 ''。 */
+async function readBridgeToken() {
+  try {
+    const fsp = await import('node:fs/promises')
+    const home = process.env.DSH_HOME || join(homedir(), '.dsh')
+    return (await fsp.readFile(join(home, '.bridge_token'), 'utf-8')).trim()
+  } catch { return '' }
+}
+
+/** 调一次桥端点; 返回 { kind, status, body }(kind 见 classifyBridgeReply)。不抛。 */
+async function bridgeCall(base, params, timeoutMs) {
+  try {
+    const token = await readBridgeToken()
+    if (!token) return { kind: 'failed', status: 0, body: 'no-token' }
+    const qs = new URLSearchParams(params).toString()
+    const resp = await fetch(base + (qs ? '?' + qs : ''), {
+      headers: { 'X-Token': token }, signal: AbortSignal.timeout(timeoutMs),
+    })
+    const body = await resp.text()
+    return { kind: classifyBridgeReply(resp.status, body), status: resp.status, body }
+  } catch (err) {
+    return { kind: 'failed', status: 0, body: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
+ * v1.5.1: 主动探测一次通知通道 (issue #2 的"可见降级"补完)。
+ *
+ * 旧行为: channel 只在**真的发过一次告警**之后才有结论, 在那之前恒为 'unknown' ——
+ * 设置面板只能显示"待首次告警确认", 等于用户最需要知道的时候偏偏查不到。
+ * 现在懒探测(第一次被 /api-dashboard/alerts 问到时才跑):
+ * 读 .bridge_token + GET /app/version, 通 → 'app-bridge', 不通/没 token → 'none'。
+ *
+ * ⚠️ 探测**不碰 sent / failed 计数** —— 那两个是"告警发送"的统计, 探测不是告警。
+ * @returns {Promise<string>} 探测后的 channel
+ */
+async function probeAlertChannel() {
+  // 已经发过告警 → channel 早有定论, 别用探测覆盖真实结果
+  if (alertChannelProbed || alertStatus.channel !== 'unknown') {
+    alertChannelProbed = true
+    return alertStatus.channel
+  }
+  alertChannelProbed = true
+  try {
+    const token = await readBridgeToken()
+    if (!token) { alertStatus.channel = 'none'; alertStatus.checkedAt = Date.now(); return alertStatus.channel }
+    const resp = await fetch(ALERT_BRIDGE_PROBE,
+      { headers: { 'X-Token': token }, signal: AbortSignal.timeout(2000) })
+    await resp.text()
+    alertStatus.channel = resp.ok ? 'app-bridge' : 'none'
+  } catch {
+    alertStatus.channel = 'none'
+  }
+  alertStatus.checkedAt = Date.now()
+  return alertStatus.channel
+}
+
+/**
+ * v1.6.8: 投递一条告警 —— 后台走通知栏; App 在前台(`FOREGROUND_SKIP`)时改发 App 内 Toast。
+ * 三个计数**如实分开**: sent(进通知栏) / skipped(前台→内提示) / failed。
+ * @returns {Promise<'notify'|'toast'|'failed'>}
+ */
+async function deliverAlert(title, text) {
+  const first = await bridgeCall(ALERT_BRIDGE_URL, { title, text }, 5000)
+  alertStatus.checkedAt = Date.now()
+  if (first.kind === 'delivered') {
+    alertStatus.channel = 'app-bridge'; alertStatus.sent++; alertStatus.lastDelivery = 'notify'
+    return 'notify'
+  }
+  if (first.kind === 'foreground-skip') {
+    // 你就在 App 里 —— 通知栏那条会被桥丢掉, 换成能立刻看见的 App 内提示
+    alertStatus.channel = 'app-bridge'
+    const toast = await bridgeCall(ALERT_BRIDGE_TOAST, { text: title + ' · ' + text }, 5000)
+    alertStatus.checkedAt = Date.now()
+    if (toast.kind === 'delivered') { alertStatus.skipped++; alertStatus.lastDelivery = 'toast'; return 'toast' }
+    alertStatus.failed++; alertStatus.lastDelivery = 'failed'
+    return 'failed'
+  }
+  alertStatus.channel = first.body === 'no-token' ? 'none' : alertStatus.channel
+  alertStatus.failed++; alertStatus.lastDelivery = 'failed'
+  return 'failed'
+}
+
+/** v1.6.8: 低档提醒文案; 'repeat' 是冷却到期后的重复提醒, 要让人看出这不是新问题。 */
+const alertMessage = (level, kind, name, val, unit) => {
+  const base = level === 'warn' ? `${name} 余额偏低: ${val}${unit}` : `${name} 余额不足: ${val}${unit}`
+  return kind === 'repeat' ? `${base}（仍未处理，再次提醒）` : base
+}
+
+/** v1.6.8: 把告警状态写回状态文件(只在真的提醒过时才写) —— 免得每次重启都重新轰炸一遍。 */
+const saveAlertState = (state) => {
+  try { savePersistedState({ alertState: state }) } catch { /* 写盘失败不影响告警本身 */ }
+}
+
 function checkAlerts(balances, config, ctx) {
+  void ctx // 旧通知通道参数保留: 调用方签名不变, 但已不再使用 (见上方说明)
   const safe = config.safeThreshold ?? 50
   const warn = config.warnThreshold ?? 10
+  const repeatMs = clampAlertRepeatHours(config.alertRepeatHours) * 3600_000
+  const now = Date.now()
   const newState = {}
+  let fired = false
 
   for (const b of balances) {
     if (b.status !== 'ok') continue
     const id = b.platform
     const val = b.percent != null ? b.percent : b.total
     const prev = lastAlertState[id]
-    let level = val > safe ? 'ok' : val > warn ? 'warn' : 'err'
-    newState[id] = level
+    const level = val > safe ? 'ok' : val > warn ? 'warn' : 'err'
+    const kind = planAlert(prev, level, now, repeatMs)
+    // 提醒过才刷新时刻, 否则沿用上次的时刻(冷却从"上一次真的提醒"算起)
+    newState[id] = { level, at: kind !== null ? now : (Number.isFinite(prev?.at) ? prev.at : now) }
+    if (kind === null) continue
 
-    if (level === 'warn' && prev !== 'warn') {
-      try {
-        const name = b.name || id
-        const msg = `🔔 ${name} 余额偏低: ${val}${b.percent != null ? '%' : (b.currency || '')}`
-        if (ctx && typeof ctx.notify === 'function') {
-          ctx.notify({ title: '哦鲸鲸', message: msg, level: 'warning' })
-        } else if (ctx && ctx.get && typeof ctx.get('webServer')?.notify === 'function') {
-          ctx.get('webServer').notify({ title: '哦鲸鲸', message: msg, level: 'warning' })
-        }
-      } catch { /* 静默 */ }
-    } else if (level === 'err' && prev !== 'err') {
-      try {
-        const name = b.name || id
-        const msg = `🚨 ${name} 余额不足: ${val}${b.percent != null ? '%' : (b.currency || '')}`
-        if (ctx && typeof ctx.notify === 'function') {
-          ctx.notify({ title: '哦鲸鲸', message: msg, level: 'error' })
-        } else if (ctx && ctx.get && typeof ctx.get('webServer')?.notify === 'function') {
-          ctx.get('webServer').notify({ title: '哦鲸鲸', message: msg, level: 'error' })
-        }
-      } catch { /* 静默 */ }
-    }
+    const name = b.name || id
+    const unit = b.percent != null ? '%' : (b.currency || '')
+    const msg = alertMessage(level, kind, name, val, unit)
+    alertStatus.last = { at: now, level, platform: id, text: msg, kind }
+    fired = true
+    void deliverAlert('哦鲸鲸', msg)
   }
   lastAlertState = newState
+  if (fired) saveAlertState(newState)
 }
 
 // 余额解析适配器
@@ -1356,9 +2105,30 @@ export function parseResponse(queryType, json, pref) {
       return { total: quota / 500000, currency: 'USD', available: null, used: null, note: 'one-api quota (÷500000, 系数待实测)' }
     }
     case 'openai-billing': {
-      const limit = toAmount(json?.hard_limit_usd)
-      if (limit === 0 && !json?.has_credit_card) return null
-      return { total: limit, currency: 'USD', available: limit, used: null, note: 'OpenAI 订阅硬上限' }
+      // v1.6.3 修复(维护者实测截图: 中转站卡片显示 $100000000.00 还带绿灯「正常」):
+      // 旧实现拿 `hard_limit_usd` 当余额 —— 那是 OpenAI 的**账户硬上限设置**, 不是余额,
+      // 且"无限制"时恒为哨兵值 1e8。本机实测 mimo.ezlook.top 的 subscription 返回
+      // soft/hard/system_hard_limit_usd 全是 100000000、**一个余额字段都没有**, 于是被
+      // 渲染成"一亿美元余额"。⚠️ 这是「选错字段就当真实数字渲染」漏洞家族的第 4 例
+      // (前 3 例: openai-credit-grants / openrouter / deepseek 多币种)。
+      //
+      // 正确来源是 credit_grants 的 `total_available`(= total_granted - total_used)。
+      // **拿不到就返回 null** —— 让 auto 探测继续试下一个端点(quota / credit_grants),
+      // 全试完则如实显示「该平台未开放余额查询」, 绝不拿上限顶替。
+      const avail = json?.total_available
+      const granted = json?.total_granted
+      const used = json?.total_used
+      const has = (v) => v !== null && v !== undefined && v !== ''
+      let total = null
+      if (has(avail)) total = toAmount(avail)
+      else if (has(granted) && has(used)) total = toAmount(granted) - toAmount(used)
+      if (total === null) return null
+      return {
+        total, currency: 'USD',
+        available: has(avail) ? toAmount(avail) : total,
+        used: has(used) ? toAmount(used) : null,
+        note: 'OpenAI 额度 (total_available)',
+      }
     }
     case 'glm': {
       // 智谱 Coding Plan 配额(实测 2026-08-30; unit 含义转自 z.ai 前端源码 / cc-switch)：
@@ -1998,12 +2768,122 @@ const loadCacheEntry = (sessionId) => {
   } catch { entry = null }
   // 只缓存成功结果, 避免一次读失败被 TTL 钉住 3 秒
   if (entry !== null) sessionCacheFiles.set(id, entry)
-  if (sessionCacheFiles.size > 256) sessionCacheFiles.clear()
+  // 不再整表清空：有数百历史会话时整清会反复击穿 TTL。
+  if (sessionCacheFiles.size > 1024) sessionCacheFiles.delete(sessionCacheFiles.keys().next().value)
   return entry
 }
 
 /** 读某会话的投影缓存 rows。任何异常 → null。 */
 const readSessionCacheRecord = (sessionId) => loadCacheEntry(sessionId)?.rows ?? null
+
+/**
+ * v1.6.2: projcache 目录里的会话 id 列表 —— 「今日花销」要靠它发现**冷会话**
+ * (框架没有同步的"列出全部会话"接口, 常驻表里只有当前开着的)。
+ * 10 秒 TTL: view() 会被频繁调用, 不能每次都读目录。
+ */
+const CACHE_ID_LIST_TTL_MS = 10000
+let cacheIdList = { at: 0, ids: [] }
+const listCacheSessionIds = () => {
+  const now = Date.now()
+  if (now - cacheIdList.at < CACHE_ID_LIST_TTL_MS) return cacheIdList.ids
+  let ids = []
+  try {
+    const home = process.env.DSH_HOME || join(homedir(), '.dsh')
+    const dir = join(home, 'storages', 'session_projcache', 'sessions')
+    ids = readdirSync(dir)
+      .filter((n) => typeof n === 'string' && n.endsWith('.json'))
+      .map((n) => n.slice(0, -5))
+      .filter((n) => safeSessionId(n) !== null)
+  } catch { ids = [] }
+  cacheIdList = { at: now, ids }
+  return ids
+}
+
+/**
+ * v1.6.2: **今日**(北京时间)全部会话的消耗, 按币种分组 —— 挂件「今天花销已经超过 ¥#」的数据源。
+ *
+ * 为什么必须跨会话: 投影只折叠本会话, 而"今天花了多少"是所有会话加起来的。
+ * 会按 sessionId 去重, 依次取: 常驻会话(内存, 更新鲜) → 冷会话(投影缓存文件)。
+ * 任何一步取不到都静默跳过 —— 这个数字是彩蛋, 绝不能拖垮主投影。
+ *
+ * @param services 服务取用器(与 collectSubagentCosts 同一个)
+ * @param priceDay (dayMap) => { 币种: 金额 } —— 计价实现由投影侧注入(与主板同一套口径, 含峰谷分相)
+ * @param selfState 当前这个 state —— **必须显式传**: 下面遍历的是"别的会话",
+ *        拿不到调用方自己那一份(第一版就漏了它, 结果今日花销恒为 0)。
+ */
+/** 把某个会话 state 里"今天"那一桶折算出来, 累进 acc(金额按币种 + token 总量 + 逐模型)。 */
+const add2 = (acc, priceDay, state, day) => {
+  // fork 的继承历史已经由父会话计过，跨会话只合并自身日桶。
+  const dayState = state?.own?.byDay !== undefined ? state.own
+    : state?.inheritedEventCount > 0 ? null : state
+  const dayMap = dayState?.byDay?.[day]
+  if (!dayMap) return
+  const s = priceDay(dayMap)
+  for (const cur of Object.keys(s.byCurrency)) {
+    acc.byCurrency[cur] = Math.round(((acc.byCurrency[cur] ?? 0) + s.byCurrency[cur]) * 1e6) / 1e6
+  }
+  for (const k of Object.keys(acc.tokens)) acc.tokens[k] += s.tokens[k] ?? 0
+  for (const model of Object.keys(s.byModel)) {
+    const cur = acc.byModel[model] ?? { tokens: 0, cost: 0, currency: s.byModel[model].currency }
+    acc.byModel[model] = {
+      tokens: cur.tokens + s.byModel[model].tokens,
+      cost: Math.round((cur.cost + s.byModel[model].cost) * 1e6) / 1e6,
+      currency: cur.currency,
+    }
+  }
+}
+
+/**
+ * v1.6.7: 导出是为了让 `test/test-today-cost.mjs` 能直接钉住「当前会话只算一次」——
+ * 这个数字以前没有任何测试覆盖, 于是 1.6.2 起一直把当前会话算两次(今日 = 本会话 ×2)。
+ */
+export const collectTodayCost = (services, priceDay, selfState) => {
+  const day = bjtParts(Date.now()).ymd
+  const acc = {
+    byCurrency: {},
+    tokens: { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 },
+    byModel: {},
+  }
+  const seen = new Set()
+  // ① 先算自己, 并登记 id —— 下面遍历常驻会话时靠 seen 跳过它
+  add2(acc, priceDay, selfState, day)
+  const selfId = typeof selfState?.sessionId === 'string' && selfState.sessionId !== '' ? selfState.sessionId : null
+  if (selfId !== null) seen.add(selfId)
+  const add = (st) => add2(acc, priceDay, st, day)
+  const svc = typeof services === 'function' ? services() : services
+  const sessions = svc?.sessions ?? null
+  const projections = svc?.projections ?? null
+  try {
+    const list = sessions?.list?.()
+    if (Array.isArray(list)) {
+      for (const s of list) {
+        const id = typeof s?.id === 'string' ? s.id : null
+        // ⚠️ v1.6.7 修: 这里**必须**用 seen 挡住, 不能只 seen.add(id) 了事。
+        //   宿主 sessions.list() 返回的是**全部常驻会话**, 当前这个会话就在里面
+        //   (SessionStore.list: [...store.values()].map(e => e.session))。① 已经把它算过了,
+        //   旧写法只登记 id 却照样 add() → 当前会话被算两次, 今日花销正好是本会话的 2 倍
+        //   (真机: 状态条 ~¥1.26, 今日总结 ¥2.53)。seen 同时顺手挡掉列表里的重复条目。
+        if (id !== null && seen.has(id)) continue
+        let st
+        try { st = projections?.stateOf?.(s, 'queryBalanceCost') } catch { continue /* 单个会话失败不影响整体 */ }
+        if (st === undefined || st === null) continue
+        // 兜底: 万一 state.sessionId 缺失(拿不到 id), 按对象身份认自己 —— 别再翻一次倍
+        if (st === selfState) continue
+        if (id !== null) seen.add(id)
+        add(st)
+      }
+    }
+  } catch { /* 宿主没给 list() → 只靠缓存目录 */ }
+  for (const id of listCacheSessionIds()) {
+    if (seen.has(id)) continue
+    const entry = loadCacheEntry(id)
+    const val = entry?.rows?.queryBalanceCost?.val
+    // 老 fork 缓存没有自身日桶，不能把继承段冒充新用量。
+    const inherited = val?.inheritedEventCount ?? entry?.identity?.inheritedEventCount
+    add(val && inherited !== undefined ? { ...val, inheritedEventCount: inherited } : val)
+  }
+  return { day, byCurrency: acc.byCurrency, tokens: acc.tokens, byModel: acc.byModel }
+}
 
 /**
  * 冷路径: 从缓存文件里取该会话的 queryBalanceCost **状态**(不是 wire 视图)。
@@ -2020,7 +2900,9 @@ const cachedCostState = (sessionId) => {
   const row = entry?.rows?.queryBalanceCost
   const val = row?.val
   if (val === null || typeof val !== 'object' || !Array.isArray(val.modelOrder) || val.byModel === null || typeof val.byModel !== 'object') return null
-  if (row.ver === 3 && val.own !== undefined) return val
+  // 只接受已知状态版本，保留 v4 峰谷桶 / v5 日桶；未来版本不可盲读。
+  if (!Number.isInteger(row.ver) || row.ver > 6 || row.ver < 1) return null
+  if ([3, 4, 5, 6].includes(row.ver) && val.own !== null && typeof val.own === 'object') return val
   const inherited = entry?.identity?.inheritedEventCount
   if (inherited === 0) {
     return {
@@ -2028,6 +2910,7 @@ const cachedCostState = (sessionId) => {
       own: {
         currentModel: val.currentModel ?? null, currentProvider: val.currentProvider ?? null,
         last: val.last ?? null, byModel: val.byModel, modelOrder: val.modelOrder,
+        phaseBuckets: val.phaseBuckets, byDay: val.byDay,
       },
     }
   }
@@ -2184,6 +3067,51 @@ export function makeCostProjection(configOrGetter, services) {
   const round6 = (n) => Math.round(n * 1e6) / 1e6
 
   /**
+   * v1.5.0: 某模型是否走 V4 峰谷表 —— 条件必须与 resolveModelPrice 内部一致
+   * (用户在 config.prices 里自填过价的那一档不算峰谷, 自填价不做峰谷切换)。
+   */
+  const phaseOfModel = (model, ts) => {
+    if (typeof model !== 'string') return null
+    if (!(model.startsWith('deepseek-v4') || model.startsWith('deepseek-flash'))) return null
+    const cfg = getConfig()
+    if (cfg?.prices && Object.prototype.hasOwnProperty.call(cfg.prices, model) && cfg.prices[model]) return null
+    return isPeakTime(ts) ? 'peak' : 'offPeak'
+  }
+  /** 往分相桶加一份用量 (不可变更新)。 */
+  const phaseAdd = (map, model, phase, buckets) => {
+    const cur = map[model] ?? {}
+    return { ...map, [model]: { ...cur, [phase]: addBuckets(cur[phase] ?? zero(), buckets) } }
+  }
+  /** 从分相桶减一份 (替换语义); 该相不存在时原样返回。 */
+  const phaseSub = (map, model, phase, buckets) => {
+    const cur = map[model]
+    if (cur === undefined || cur[phase] === undefined) return map
+    return { ...map, [model]: { ...cur, [phase]: subBuckets(cur[phase], buckets) } }
+  }
+
+  /** v1.6.2: 事件归属的「日」—— 与峰谷判定共用北京时间, 免掉跨日界的 8 小时错位。 */
+  const dayKeyOf = (ts) => bjtParts(Number.isFinite(ts) ? ts : Date.now()).ymd
+  /** 相名: 走峰谷表的模型给 peak/offPeak, 其余归 flat (它们本来就不分相)。 */
+  const slotOf = (phase) => (phase === 'peak' || phase === 'offPeak' ? phase : 'flat')
+  /** 往日桶加一份用量 (不可变更新)。 */
+  const dayAdd = (map, day, model, phase, buckets) => {
+    const dayMap = map[day] ?? {}
+    const cur = dayMap[model] ?? {}
+    const slot = slotOf(phase)
+    return { ...map, [day]: { ...dayMap, [model]: { ...cur, [slot]: addBuckets(cur[slot] ?? zero(), buckets) } } }
+  }
+  /** 从日桶减一份 (替换语义) —— 重试替换槽位时必须回退, 否则同一笔会被算两次。 */
+  const daySub = (map, day, model, phase, buckets) => {
+    const dayMap = map[day]
+    if (dayMap === undefined) return map
+    const cur = dayMap[model]
+    if (cur === undefined) return map
+    const slot = slotOf(phase)
+    if (cur[slot] === undefined) return map
+    return { ...map, [day]: { ...dayMap, [model]: { ...cur, [slot]: subBuckets(cur[slot], buckets) } } }
+  }
+
+  /**
    * v1.4.0: 从一条 assistant stream 里取**最后一次** usage chunk。
    * 与 dsh-llm 的 `lastAssistantStreamChunk(stream, 'usage')` 同语义, 本地实现以免给插件引入额外依赖
    * (`dependencies` 必须保持为空是硬约束)。
@@ -2214,6 +3142,48 @@ export function makeCostProjection(configOrGetter, services) {
    * v1.4.0: 把一份投影状态折成金额汇总 —— 主视图与子代理汇总**共用同一套口径**,
    * 保证「子代理那行」与「主板数字」算法完全一致 (含峰谷、币种、缓存读写分桶)。
    */
+  /**
+   * v1.6.2: 一天的用量桶 → 花费(按币种分组)。
+   * 计价口径与 summarize **逐项一致**(原生币种 / 峰谷分相 / 缓存写缺省回退到标准输入价),
+   * 只是数据源从"整段历史"换成"某一天的桶" —— byDay 的形状是 { 模型: { peak?, offPeak?, flat? } }。
+   */
+  const summarizeDay = (dayMap) => {
+    const cfg = getConfig()
+    const byCurrency = {}
+    const tokens = { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
+    /** v1.6.3: 逐模型的今日用量 —— 「今日总结」的模型占比用它。 */
+    const byModel = {}
+    const empty = { byCurrency, tokens, byModel }
+    if (dayMap === null || typeof dayMap !== 'object') return empty
+    const costOf = (bk, price) => ((bk.uncachedInputTokens * price.cacheMiss + bk.cacheWriteTokens * (price.cacheWrite ?? price.cacheMiss) + bk.cacheReadTokens * price.cacheHit + bk.outputTokens * price.output)) / 1e6
+    const sumOf = (bk) => (bk?.uncachedInputTokens ?? 0) + (bk?.cacheReadTokens ?? 0) + (bk?.cacheWriteTokens ?? 0) + (bk?.outputTokens ?? 0)
+    for (const model of Object.keys(dayMap)) {
+      const slots = dayMap[model] ?? {}
+      let c = 0
+      // 走峰谷表的模型分 peak/offPeak 两桶各自计价; 其余在 flat 桶里, 按当前时刻的价(没有相)
+      if (slots.peak !== undefined || slots.offPeak !== undefined) {
+        c += costOf(slots.peak ?? zero(), resolveModelPrice(cfg, model, undefined, 'peak'))
+        c += costOf(slots.offPeak ?? zero(), resolveModelPrice(cfg, model, undefined, 'offPeak'))
+      }
+      if (slots.flat !== undefined) c += costOf(slots.flat, resolveModelPrice(cfg, model))
+      // token 维度不分峰谷(它本来也不受时段影响), 把该模型所有槽位加起来
+      let tk = 0
+      for (const slot of Object.keys(slots)) {
+        const bk = slots[slot]
+        if (!bk) continue
+        tk += sumOf(bk)
+        tokens.uncachedInput += bk.uncachedInputTokens ?? 0
+        tokens.cacheRead += bk.cacheReadTokens ?? 0
+        tokens.cacheWrite += bk.cacheWriteTokens ?? 0
+        tokens.output += bk.outputTokens ?? 0
+      }
+      const cur = currencyForModel(cfg, model)
+      if (c > 0) byCurrency[cur] = round6((byCurrency[cur] ?? 0) + c)
+      if (tk > 0 || c > 0) byModel[model] = { tokens: tk, cost: round6(c), currency: cur }
+    }
+    return { byCurrency, tokens, byModel }
+  }
+
   const summarize = (state) => {
     const cfg = getConfig()
     const mainCurrency = (cfg.currency ?? 'CNY').toUpperCase()
@@ -2230,8 +3200,16 @@ export function makeCostProjection(configOrGetter, services) {
       tokens.cacheWrite += b.cacheWriteTokens
       tokens.output += b.outputTokens
       // 支持 DeepSeek 谷峰自动计费
-      const price = resolveModelPrice(cfg, model)
-      const c = ((b.uncachedInputTokens + b.cacheWriteTokens) * price.cacheMiss + b.cacheReadTokens * price.cacheHit + b.outputTokens * price.output) / 1e6
+      // v1.5.0: 缓存写入单独计价 —— 官方普遍按**标准输入价的 125%**收 (Anthropic $6.25/$5、阿里显式缓存明文 125%、
+      //   MiniMax 2.625/2.1), Kimi K3 更是另有 ¥20/1M 的写入费。表里没给 cacheWrite 的条目回落到 cacheMiss (= 旧行为, 结果不变)。
+      const costOf = (bk, price) => ((bk.uncachedInputTokens * price.cacheMiss + bk.cacheWriteTokens * (price.cacheWrite ?? price.cacheMiss) + bk.cacheReadTokens * price.cacheHit + bk.outputTokens * price.output)) / 1e6
+      // v1.5.0: 有分相数据就按峰/谷各自计价 (每笔用量用**它发生那一刻**的价),
+      //   没有(老缓存/非峰谷模型)才回退到按当前时刻计价的老行为。
+      const pb = state?.phaseBuckets?.[model]
+      const c = (pb !== undefined && (pb.peak !== undefined || pb.offPeak !== undefined))
+        ? costOf(pb.peak ?? zero(), resolveModelPrice(cfg, model, undefined, 'peak'))
+          + costOf(pb.offPeak ?? zero(), resolveModelPrice(cfg, model, undefined, 'offPeak'))
+        : (() => { const price = resolveModelPrice(cfg, model); return costOf(b, price) })()
       // v1.3.2: 该模型实际币种 (海外模型可能与主货币不同)
       const cur = currencyForModel(cfg, model)
       if (c > 0) {
@@ -2284,15 +3262,31 @@ export function makeCostProjection(configOrGetter, services) {
       if (usage === null) return unchanged ? state : { ...state, currentModel: nextModel, currentProvider: nextProvider }
       const model = nextModel ?? 'unknown'
       const buckets = bucketsOf(usage)
+      // v1.5.0: 按**事件发生时刻**(event.time)判定峰谷, 而不是等 summarize 时用 Date.now()。
+      //   后者会把整段历史消耗都按"打开面板那一刻"的时段计价 —— DeepSeek 峰谷价差 2 倍,
+      //   谷时跑的量在峰时查看会被翻倍, 反之漏掉一半。事件无 time 时回退当前时刻。
+      const eventTime = Number.isFinite(event?.time) ? event.time : Date.now()
+      const phase = phaseOfModel(model, eventTime)
+      const day = dayKeyOf(eventTime)
       const prev = state.last !== null && state.last.turn === turn && state.last.step === step ? state.last : null
       if (prev !== null && prev.model === model && bucketsEqual(prev.buckets, buckets)) {
         return unchanged ? state : { ...state, currentModel: nextModel, currentProvider: nextProvider }
       }
       const isNewModel = !(model in state.byModel)
       let byModel = state.byModel
-      if (prev !== null) byModel = { ...byModel, [prev.model]: subBuckets(byModel[prev.model] ?? zero(), prev.buckets) }
+      let phaseBuckets = state.phaseBuckets ?? {}
+      let byDay = state.byDay ?? {}
+      if (prev !== null) {
+        byModel = { ...byModel, [prev.model]: subBuckets(byModel[prev.model] ?? zero(), prev.buckets) }
+        // 替换槽位时, 分相桶也要按**上一个事件当时的相**回退, 否则重试会把同一笔算两次。
+        if (prev.phase) phaseBuckets = phaseSub(phaseBuckets, prev.model, prev.phase, prev.buckets)
+        // 日桶同理: 按上一个事件**当时那一天**回退 (老状态没有 prev.day, 用当前 day 兜底)
+        byDay = daySub(byDay, prev.day ?? day, prev.model, prev.phase, prev.buckets)
+      }
       byModel = { ...byModel, [model]: addBuckets(byModel[model] ?? zero(), buckets) }
-      return { ...state, currentModel: nextModel, currentProvider: nextProvider, last: { turn, step, model, buckets }, byModel, modelOrder: isNewModel ? [...state.modelOrder, model] : state.modelOrder }
+      if (phase) phaseBuckets = phaseAdd(phaseBuckets, model, phase, buckets)
+      byDay = dayAdd(byDay, day, model, phase, buckets)
+      return { ...state, currentModel: nextModel, currentProvider: nextProvider, last: { turn, step, model, buckets, phase, day }, byModel, phaseBuckets, byDay, modelOrder: isNewModel ? [...state.modelOrder, model] : state.modelOrder }
   }
 
   return {
@@ -2312,6 +3306,10 @@ export function makeCostProjection(configOrGetter, services) {
           cacheWriteTokens: z.number(),
           outputTokens: z.number(),
         }),
+        /** v1.5.0: 该事件发生时的峰谷相, 替换槽位时要按同一个相回退分相桶。 */
+        phase: z.string().nullable().optional(),
+        /** v1.6.2: 该事件归属的日(北京时间 yyyy-mm-dd), 替换槽位时要按同一天回退日桶。 */
+        day: z.string().optional(),
       }).nullable(),
       byModel: z.record(z.string(), z.object({
         uncachedInputTokens: z.number(),
@@ -2319,29 +3317,49 @@ export function makeCostProjection(configOrGetter, services) {
         cacheWriteTokens: z.number(),
         outputTokens: z.number(),
       })),
+      /** v1.5.0: 按事件发生时刻拆分的峰/谷用量桶 (仅走 V4 峰谷表的模型才会出现)。 */
+      phaseBuckets: z.record(z.string(), z.object({
+        peak: z.object({ uncachedInputTokens: z.number(), cacheReadTokens: z.number(), cacheWriteTokens: z.number(), outputTokens: z.number() }).optional(),
+        offPeak: z.object({ uncachedInputTokens: z.number(), cacheReadTokens: z.number(), cacheWriteTokens: z.number(), outputTokens: z.number() }).optional(),
+      })).optional(),
+      /**
+       * v1.6.2: 按「日」拆的用量桶 —— 「今日花销」的数据源。
+       * 结构: { 'yyyy-mm-dd': { 模型: { peak?, offPeak?, flat? } } }。
+       * 日期用**北京时间**(bjtParts), 与峰谷判定同一套口径 —— 否则跨日界那 8 小时会和峰谷对不上。
+       * `flat` 收那些不走 V4 峰谷表的模型(它们的 phase 是 null)。
+       */
+      byDay: z.record(z.string(), z.record(z.string(), z.object({
+        peak: z.object({ uncachedInputTokens: z.number(), cacheReadTokens: z.number(), cacheWriteTokens: z.number(), outputTokens: z.number() }).optional(),
+        offPeak: z.object({ uncachedInputTokens: z.number(), cacheReadTokens: z.number(), cacheWriteTokens: z.number(), outputTokens: z.number() }).optional(),
+        flat: z.object({ uncachedInputTokens: z.number(), cacheReadTokens: z.number(), cacheWriteTokens: z.number(), outputTokens: z.number() }).optional(),
+      }))).optional(),
       modelOrder: z.array(z.string()),
       /** v1.4.0: 本投影所属会话 id —— 子代理汇总要拿它去查 `subagentCatalog`。空串表示未知。 */
       sessionId: z.string(),
       inheritedEventCount: z.number().int().nonnegative(),
       ownBoundaryKnown: z.boolean(),
       ownChildIds: z.array(z.string()),
-      own: z.object({ currentModel: z.string().nullable(), currentProvider: z.string().nullable(), last: z.any().nullable(), byModel: z.record(z.string(), z.object({ uncachedInputTokens: z.number().nonnegative(), cacheReadTokens: z.number().nonnegative(), cacheWriteTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative() })), modelOrder: z.array(z.string()) }),
+      own: z.object({ currentModel: z.string().nullable(), currentProvider: z.string().nullable(), last: z.any().nullable(), byModel: z.record(z.string(), z.object({ uncachedInputTokens: z.number().nonnegative(), cacheReadTokens: z.number().nonnegative(), cacheWriteTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative() })), phaseBuckets: z.record(z.string(), z.any()).optional(), byDay: z.record(z.string(), z.record(z.string(), z.any())).optional(), modelOrder: z.array(z.string()) }),
     }),
     init: (header, inheritedEventCount) => ({
-      currentModel: null, currentProvider: null, last: null, byModel: {}, modelOrder: [],
+      currentModel: null, currentProvider: null, last: null, byModel: {}, phaseBuckets: {}, byDay: {}, modelOrder: [],
       sessionId: typeof header?.id === 'string' ? header.id : '',
       inheritedEventCount: Number.isSafeInteger(inheritedEventCount) && inheritedEventCount >= 0 ? inheritedEventCount : 0,
       ownBoundaryKnown: (Number.isSafeInteger(inheritedEventCount) && inheritedEventCount >= 0) || !header?.isSeeded,
       ownChildIds: [],
-      own: { currentModel: null, currentProvider: null, last: null, byModel: {}, modelOrder: [] },
+      own: { currentModel: null, currentProvider: null, last: null, byModel: {}, phaseBuckets: {}, byDay: {}, modelOrder: [] },
     }),
     apply: (state, event) => {
       const full = foldUsage(state, event)
       const isOwn = state.ownBoundaryKnown && (state.inheritedEventCount === 0 || (Number.isSafeInteger(event.seq) && event.seq >= state.inheritedEventCount))
       // Inherited model context is useful; inherited usage and retry slots are not.
-      const own = isOwn ? foldUsage(state.own, event) : { ...state.own, currentModel: full.currentModel, currentProvider: full.currentProvider }
+      const own = isOwn ? foldUsage(state.own, event)
+        : full.currentModel === state.own.currentModel && full.currentProvider === state.own.currentProvider
+          ? state.own : { ...state.own, currentModel: full.currentModel, currentProvider: full.currentProvider }
       const childId = isOwn && event.type === 'subagent/catalog' ? event.data?.childId : null
       const ownChildIds = typeof childId === 'string' && !state.ownChildIds.includes(childId) ? [...state.ownChildIds, childId] : state.ownChildIds
+      // 无关事件保留引用，宿主不用为每次工具事件同步扫描/序列化整个看板。
+      if (full === state && own === state.own && ownChildIds === state.ownChildIds) return state
       return { ...full, own, ownChildIds }
     },
     wire: {
@@ -2383,15 +3401,42 @@ export function makeCostProjection(configOrGetter, services) {
           }).strict(),
           models: z.array(z.string()),
         }).strict()).optional(),
+        /**
+         * v1.6.2: 「今日」(北京时间)全部会话的消耗, 按币种分组 —— 挂件超限提醒的数据源。
+         * 跨会话汇总, 与主板数字同一套计价口径(原生币种 + 峰谷分相)。
+         */
+        todayByCurrency: z.record(z.string(), z.number().nonnegative()).optional(),
+        todayDay: z.string().optional(),
+        /**
+         * v1.6.3: **当前模型是否走 DeepSeek 峰谷表** —— 状态条据此决定要不要显示 ☀️/🌙。
+         * 旧行为只看 config.isPeak(那是个恒真的全局布尔), 于是**任何模型**都会挂上峰谷标记,
+         * 连 glm-5.3 / claude 这种根本没有峰谷价的面板也在显示, 误导用户(维护者实测反馈)。
+         */
+        peakValley: z.boolean().optional(),
+        /** v1.6.3: 今日 token 总量(四类分桶) —— 「今日总结」用。 */
+        todayTokens: z.object({
+          uncachedInput: z.number().nonnegative(),
+          cacheRead: z.number().nonnegative(),
+          cacheWrite: z.number().nonnegative(),
+          output: z.number().nonnegative(),
+        }).optional(),
+        /** v1.6.3: 逐模型的今日用量 { 模型: { tokens, cost, currency } } —— 模型占比用它。 */
+        todayByModel: z.record(z.string(), z.object({
+          tokens: z.number().nonnegative(),
+          cost: z.number().nonnegative(),
+          currency: z.string(),
+        })).optional(),
       }).strict(),
       view: (state) => {
       const cfg = getConfig()
       const mainCurrency = (cfg.currency ?? 'CNY').toUpperCase()
       // v1.4.0: 子代理消耗 (换行单独展示)。取不到服务/没有子代理 → 空数组。
       const subagents = collectSubagentCosts(services, state.sessionId, summarize, state.ownChildIds)
+      // v1.6.2: 今日花销 —— 自身那一份直接用本 state, 其余会话走 collectTodayCost (带 TTL, 见函数注释)
+      const today = collectTodayCost(services, summarizeDay, state)
       // 无事件时返回 waiting 标记, 客户端据此显示 "~—" 而非 "~¥0"
       if (state.modelOrder.length === 0) {
-        return { models: [], currentModel: state.currentModel ?? null, currentProvider: state.currentProvider ?? null, cost: -1, costByModel: {}, costByCurrency: {}, currencyByModel: {}, mixedCurrency: false, tokens: { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 }, tokensByModel: {}, currency: mainCurrency, isPeak: isPeakTime(), waiting: true, subagents }
+        return { models: [], currentModel: state.currentModel ?? null, currentProvider: state.currentProvider ?? null, cost: -1, costByModel: {}, costByCurrency: {}, currencyByModel: {}, mixedCurrency: false, tokens: { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 }, tokensByModel: {}, currency: mainCurrency, isPeak: isPeakTime(), waiting: true, subagents, todayByCurrency: today.byCurrency, todayDay: today.day, todayTokens: today.tokens, todayByModel: today.byModel, peakValley: phaseOfModel(state.currentModel ?? '', Date.now()) !== null }
       }
       const s = summarize(state)
       return {
@@ -2399,10 +3444,13 @@ export function makeCostProjection(configOrGetter, services) {
         cost: s.cost, costByModel: s.costByModel, costByCurrency: s.costByCurrency, currencyByModel: s.currencyByModel,
         mixedCurrency: s.mixedCurrency, tokens: s.tokens, tokensByModel: s.tokensByModel,
         currency: mainCurrency, isPeak: isPeakTime(), waiting: false, subagents,
+        todayByCurrency: today.byCurrency, todayDay: today.day,
+        todayTokens: today.tokens, todayByModel: today.byModel,
+        peakValley: phaseOfModel(state.currentModel ?? '', Date.now()) !== null,
       }
       },
     },
-    stateVersion: 3,
+    stateVersion: 6,
   }
 }
 
@@ -2423,9 +3471,10 @@ export function apply(ctx, config) {
     }
   } catch { /* 忽略 */ }
   const runtimeConfig = {
-    refreshIntervalMs: persisted.refreshIntervalMs ?? config.refreshIntervalMs ?? 5000,
-    clientPollIntervalMs: persisted.clientPollIntervalMs ?? config.clientPollIntervalMs ?? 5000,
-    timeoutMs: persisted.timeoutMs ?? config.timeoutMs ?? 8000,
+    // ⚠️ 两个来源都要夹: persisted 已被 sanitizePersistedShape 夹过, 但 config 没有 (见 clampMs 注释)。
+    refreshIntervalMs: clampMs(persisted.refreshIntervalMs ?? config.refreshIntervalMs, 1000, 60000, 5000),
+    clientPollIntervalMs: clampMs(persisted.clientPollIntervalMs ?? config.clientPollIntervalMs, 1000, 60000, 5000),
+    timeoutMs: clampMs(persisted.timeoutMs ?? config.timeoutMs, 1000, 60000, 8000),
     presets: config.presets ?? PLATFORM_PRESETS.map(p => p.id),
     // H-1 (v1.4.1): 这里必须带 Array.isArray —— 状态文件形状跑偏时 apply() 抛出 =
     // 整个 dsh web 启动失败(migratePersistedState 已消毒, 这里是第二道防线)
@@ -2437,9 +3486,14 @@ export function apply(ctx, config) {
     // v1.3.2: 海外模型独立计价货币 ('follow' = 跟随主货币, 默认, 行为同 v1.2.6)
     overseasCurrency: persisted.overseasCurrency ?? config.overseasCurrency ?? 'follow',
     safeThreshold: persisted.safeThreshold ?? config.safeThreshold ?? 50,
+    // v1.6.2: 今日花销提醒阈值 —— 0 表示关闭(默认关, 不打扰存量用户)
+    dailyLimit: (() => { const n = Number(persisted.dailyLimit ?? config.dailyLimit); return Number.isFinite(n) && n > 0 ? n : 0 })(),
+    // v1.6.8: 重复提醒间隔(小时); 0=关闭。默认 6 小时(真机反馈「只提醒一次太容易漏」)
+    alertRepeatHours: clampAlertRepeatHours(persisted.alertRepeatHours ?? config.alertRepeatHours ?? 6),
     warnThreshold: persisted.warnThreshold ?? config.warnThreshold ?? 10,
     whaleEnabled: persisted.whaleEnabled ?? config.whaleEnabled ?? false,
     showNoBalanceBrands: persisted.showNoBalanceBrands ?? config.showNoBalanceBrands ?? false,
+    showSubagentCapsules: typeof persisted.showSubagentCapsules === 'boolean' ? persisted.showSubagentCapsules : config.showSubagentCapsules ?? true,
     officialProviders: normalizeOfficialProviders(persisted.officialProviders ?? config.officialProviders ?? []),
     // v1.4.0「真自动」: 被用户关掉的 DSH provider (默认空 = 全部启用)。复用同一个名单规范化器。
     dshProviderOptOut: normalizeOfficialProviders(persisted.dshProviderOptOut ?? config.dshProviderOptOut ?? []),
@@ -2452,6 +3506,12 @@ export function apply(ctx, config) {
   }
 
   const getConfig = () => runtimeConfig
+
+  // v1.6.8: 告警状态(上次档位 + 上次提醒时刻)跟着状态文件走 —— 否则每次重启都会把
+  // 所有低余额平台重新提醒一遍(repeat 冷却也失去意义)。
+  lastAlertState = (persisted.alertState && typeof persisted.alertState === 'object' && !Array.isArray(persisted.alertState))
+    ? persisted.alertState
+    : {}
 
   /** 直接读 ~/.dsh/.credentials.yaml 的 refs: 段 —— 拿不到 credentials 服务时的兜底。
    *  @param {string[]} names 要找的 ref 名 (遇到第一个有值的就返回) */
@@ -2494,7 +3554,9 @@ export function apply(ctx, config) {
 
   /** 解析预设平台的 API key (从环境变量、credentials 系统或直接读凭据文件) */
   const resolvePresetKey = async (platform) => {
-    const refs = platform.envKeys || []
+    const declaredRef = platform.id === 'deepseek' ? officialDeepSeekRef() : ''
+    if (declaredRef) { const key = await resolveApiKeyRef(declaredRef); if (key) return key }
+    const refs = [...new Set([declaredRef, ...(platform.envKeys || [])].filter(Boolean))]
     // 1) 环境变量
     for (const name of refs) {
       if (process.env[name]) return process.env[name]
@@ -2542,13 +3604,15 @@ export function apply(ctx, config) {
     const on = new Set(selectDshProviders(entries, kinds, runtimeConfig.dshProviderOptOut).map((p) => p.name))
     return Object.keys(entries).sort().map((name) => {
       const e = entries[name]
-      const kind = e.baseURL ? (kinds[name] || 'unknown') : 'no-base-url'
+      // v1.4.6: 一律给 official | relay —— 认不出官方即中转站(维护者要求)。
+      // 有没有写 baseURL 单独用 hasBaseURL 标出来: 没 URL 的自动查不了余额, 但仍按中转站归类。
+      const kind = kinds[name] === 'official' ? 'official' : 'relay'
       return {
         name,
         baseURL: e.baseURL,
         apiKeyEnv: e.apiKeyEnv,
-        // official | relay | unknown(主机名解析不出) | no-base-url(没写 baseURL, 不表态)
         kind,
+        hasBaseURL: !!e.baseURL,
         enabled: on.has(name),
       }
     })
@@ -2558,6 +3622,7 @@ export function apply(ctx, config) {
   let inflight = null
 
   const refreshAll = async () => {
+    if (!loopActive) return
     if (inflight !== null) return inflight
     inflight = (async () => {
       const presetList = PLATFORM_PRESETS.filter(p => runtimeConfig.presets.includes(p.id))
@@ -2578,6 +3643,7 @@ export function apply(ctx, config) {
         ...modelList.map(async (m) => queryCustomModel(m, runtimeConfig)),
       ]
       const results = await Promise.allSettled(tasks)
+      if (!loopActive) return // 卸载后的在飞结果不能再写告警/缓存。
       // v0.5.7: last-known-good 兜底 — 平台瞬时网络故障(超时/DNS抖动)不冲掉上次成功数据,
       // 避免看板红闪「异常」; 标注 stale 提示用户这是暂存值
       const prevBalances = Array.isArray(cache.balances) ? cache.balances : []
@@ -2592,6 +3658,14 @@ export function apply(ctx, config) {
         }
         return cur
       })
+      // v1.6.0: 给每个平台挂上「去充值」地址, 客户端卡片直接读 —— 省掉再拉一次 /platforms。
+      // 地址**只**来自服务端预设表; 自定义中转站没有"开放平台"可言, 查不到就不挂字段,
+      // 卡片上自然不出现按钮 (宁缺毋滥, 不给一个点了会 404 的入口)。
+      const consoleUrlOf = new Map(PLATFORM_PRESETS.filter(p => p.consoleUrl).map(p => [p.id, p.consoleUrl]))
+      for (const b of balances) {
+        const u = consoleUrlOf.get(b.platform)
+        if (u) b.consoleUrl = u
+      }
       cache = {
         balances, fetchedAt: Date.now(), error: null,
         config: {
@@ -2603,13 +3677,23 @@ export function apply(ctx, config) {
           overseasCurrency: runtimeConfig.overseasCurrency,
           isPeak: isPeakTime(),
           isWeekend: isWeekend(),
+          dailyLimit: runtimeConfig.dailyLimit,
+          // v1.6.8: 重复提醒间隔(小时) —— 设置面板那个输入框的初值来源之一
+          alertRepeatHours: runtimeConfig.alertRepeatHours,
           whaleEnabled: !!runtimeConfig.whaleEnabled,
           showNoBalanceBrands: !!runtimeConfig.showNoBalanceBrands,
+            showSubagentCapsules: !!runtimeConfig.showSubagentCapsules,
           // provider 官方/中转判定素材下发给客户端 (第 1 层: 用户名单; 第 2 层: baseURL 域名判定)
           officialProviders: runtimeConfig.officialProviders,
           providerKinds: readProviderKinds(),
           // v1.4.0「真自动」: DSH provider 发现结果 (只读, 不含 key)
           dshProviders: readDshProviderStatus(),
+          // v1.5.0-desktop-preview: 版本与预发行标识 —— 客户端据此显示「预览版」横幅, 并停用一键更新
+          version: PLUGIN_VERSION,
+          preview: IS_PREVIEW,
+          // v1.5.0-desktop-preview.4: 更新频道 —— 客户端据此决定「一键更新」能不能点
+          updateRef: UPDATE_REF,
+          previewChannel: PREVIEW_CHANNEL,
         },
       }
       cache.etag = '"' + fnv1a(JSON.stringify(cache.balances) + '|' + JSON.stringify(cache.config)) + '"'
@@ -2619,23 +3703,36 @@ export function apply(ctx, config) {
     return inflight
   }
 
-  let loopTimer = null
+  let loopTimer = null, loopGeneration = 0, loopActive = false
   const resetLoop = () => {
+    const generation = ++loopGeneration
     if (loopTimer !== null) { clearTimeout(loopTimer); loopTimer = null }
-    const run = () => { refreshAll().catch(() => {}).finally(() => { loopTimer = setTimeout(run, runtimeConfig.refreshIntervalMs) }) }
+    if (!loopActive) return
+    const run = () => {
+      loopTimer = null
+      if (!loopActive || generation !== loopGeneration) return
+      refreshAll().catch(() => {}).finally(() => {
+        if (loopActive && generation === loopGeneration) loopTimer = setTimeout(run, runtimeConfig.refreshIntervalMs)
+      })
+    }
     loopTimer = setTimeout(run, 0)
   }
 
   ctx.effect(() => {
+    loopActive = true
     resetLoop()
-    return () => { if (loopTimer !== null) clearTimeout(loopTimer) }
+    return () => {
+      loopActive = false; ++loopGeneration
+      if (loopTimer !== null) { clearTimeout(loopTimer); loopTimer = null }
+    }
   }, 'dsh-api-dashboard: refresh loop')
 
   // HTTP 路由
   ctx.inject(['webServer'], (webCtx) => {
     const sendJson = (res, code, data) => {
       const body = JSON.stringify(data)
-      res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Length': Buffer.byteLength(body) })
+      // 控制JSON保持原始字节发送，宿主压缩钩子尊重no-transform。
+      res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store, no-transform', 'Content-Length': Buffer.byteLength(body) })
       res.end(body)
     }
 
@@ -2667,13 +3764,17 @@ export function apply(ctx, config) {
      *    必须用嵌套 inject 拿服务实例。
      */
     let connectionSvc = null
-    ctx.inject(['connection'], (c) => { connectionSvc = c.connection })
+    ctx.inject(['connection'], (c) => {
+      connectionSvc = c.connection
+      return () => { connectionSvc = null }
+    })
     const allowRequest = (req, res) => {
       const conn = connectionSvc
-      // 老版本 dsh 没有 connection 服务时放行(那时本来也没有鉴权概念), 避免把插件打死
-      if (!conn || typeof conn.requestRejection !== 'function') return true
-      let rejection
-      try { rejection = conn.requestRejection(req) } catch { rejection = undefined }
+      // 依赖尚未就绪/已卸载/校验异常时拒绝，不能把加载竞态变成鉴权绕过。
+      let rejection = 503
+      if (conn && typeof conn.requestRejection === 'function') {
+        try { rejection = conn.requestRejection(req) } catch { rejection = 503 }
+      }
       if (rejection === undefined) return true
       res.writeHead(rejection, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
       res.end(rejection === 401 ? 'dsh web authentication required; reopen the URL printed by dsh web.\n' : 'forbidden\n')
@@ -2752,6 +3853,8 @@ export function apply(ctx, config) {
         if (req.method !== 'GET') { res.writeHead(405, { Allow: 'GET' }); res.end(); return }
         const presets = PLATFORM_PRESETS.filter(p => runtimeConfig.presets.includes(p.id)).map(p => ({
           id: p.id, name: p.label, icon: p.icon, color: p.color, category: p.category, queryType: p.queryType,
+          // v1.6.0: 开放平台/充值入口 (空串 = 拿不到可靠地址, 客户端据此不渲染按钮)
+          consoleUrl: p.consoleUrl || '',
         }))
         sendJson(res, 200, { ok: true, presets })
       },
@@ -2854,10 +3957,17 @@ export function apply(ctx, config) {
         if (!allowRequest(req, res)) return
         if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }); res.end(); return }
         try {
-          const result = await applyUpdate({})
+          let payload
+          try { payload = JSON.parse(await readBody(req)) } catch { return sendJson(res, 400, { ok: false, error: 'invalid-confirmation' }) }
+          if (typeof payload?.expectedVersion !== 'string' || !semver.valid(payload.expectedVersion)
+              || !/^[a-f0-9]{64}$/.test(payload?.confirmationToken ?? '')) return sendJson(res, 400, { ok: false, error: 'invalid-confirmation' })
+          const result = await applyUpdate({ expectedVersion: payload.expectedVersion, confirmationToken: payload.confirmationToken })
           updateCache = { checkedAt: Date.now(), result: { ok: true, current: result.installed, remote: result.installed, hasUpdate: false, checkedAt: Date.now() } }
           sendJson(res, 200, { ok: true, installed: result.installed, targets: result.targets, backup: result.backup, needRestart: true })
         } catch (err) {
+          if (['update-incompatible', 'update-unknown', 'update-changed', 'update-busy', 'update-dependencies'].includes(err?.code)) {
+            return sendJson(res, 409, { ok: false, error: err.code })
+          }
           const msg = /already up to date/.test(String(err?.message)) ? `already up to date`
             : /GitHub API|download|remote version/.test(String(err?.message)) ? 'network failed'
             : 'update failed'
@@ -2938,11 +4048,22 @@ export function apply(ctx, config) {
         if (!allowRequest(req, res)) return
           if (req.method !== 'GET') { res.writeHead(405, { Allow: 'GET' }); res.end(); return }
           try {
-            const set = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('set') === 'fx1' ? 'fx1' : 'duck'
-            const table = { duck: { press: 'Ya1.mp3', release: 'Ya2.mp3' }, fx1: { press: 'D1.mp3', release: 'D2.mp3' } }
-            const data = readFileSync(whaleAsset(table[set][kind]))
+            // v1.5.0: 音效组 2 → 4。后两组是**交叉配对**(把现有两组的按下/松开互换组合),
+            // 不动任何素材就能多出两种手感 —— 上游自 0.3.1(2026-09-16) 起把 assets 划出 MIT 范围
+            // (其 PROVENANCE.md: 素材不授予再许可), 所以这里刻意**不引入上游新增音效**。
+            // 素材许可与来源见 assets/whale/LICENSE-whale-widget.txt。
+            const WHALE_SOUND_SETS = {
+              duck: { press: 'Ya1.mp3', release: 'Ya2.mp3' },
+              fx1: { press: 'D1.mp3', release: 'D2.mp3' },
+              fx2: { press: 'D1.mp3', release: 'Ya2.mp3' },
+              fx3: { press: 'Ya1.mp3', release: 'D2.mp3' },
+            }
+            const wanted = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('set')
+            const set = Object.prototype.hasOwnProperty.call(WHALE_SOUND_SETS, wanted) ? wanted : 'duck'
+            const file = WHALE_SOUND_SETS[set][kind]
+            const data = readFileSync(whaleAsset(file))
             res.writeHead(200, {
-              'Content-Type': 'audio/mpeg',
+              'Content-Type': file.endsWith('.wav') ? 'audio/wav' : 'audio/mpeg',
               'Cache-Control': 'no-store',
               'Content-Length': data.length,
             })
@@ -2965,7 +4086,7 @@ export function apply(ctx, config) {
             const body = raw ? JSON.parse(raw) : {}
             const cur = runtimeConfig.whaleSettings
             const num = (v, lo, hi, dflt) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(Math.max(v, lo), hi) : dflt)
-            runtimeConfig.whaleSettings = {
+            const nextSettings = {
               scale: num(body.scale, 0.6, 2.5, cur.scale),
               soundOn: typeof body.soundOn === 'boolean' ? body.soundOn : cur.soundOn,
               soundSet: body.soundSet === 'fx1' ? 'fx1' : (body.soundSet === 'duck' ? 'duck' : cur.soundSet),
@@ -2979,20 +4100,10 @@ export function apply(ctx, config) {
               // v1.1.0: 只保留左右吸附 (上下不再缩回); '' = 停在屏幕中间不缩
               side: ['left', 'right', ''].includes(body.side) ? body.side : cur.side,
             }
-            savePersistedState({
-              refreshIntervalMs: runtimeConfig.refreshIntervalMs,
-              clientPollIntervalMs: runtimeConfig.clientPollIntervalMs,
-              timeoutMs: runtimeConfig.timeoutMs,
-              customRelays: runtimeConfig.customRelays,
-              customModels: runtimeConfig.customModels,
-              currency: runtimeConfig.currency,
-              overseasCurrency: runtimeConfig.overseasCurrency,
-              safeThreshold: runtimeConfig.safeThreshold,
-              warnThreshold: runtimeConfig.warnThreshold,
-              whaleEnabled: runtimeConfig.whaleEnabled,
-              showNoBalanceBrands: runtimeConfig.showNoBalanceBrands,
-              whaleSettings: runtimeConfig.whaleSettings,
-            })
+            if (!savePersistedState({ whaleSettings: nextSettings })) {
+              return sendJson(res, 500, { ok: false, error: 'settings-save-failed' })
+            }
+            runtimeConfig.whaleSettings = nextSettings
             sendJson(res, 200, { ok: true, settings: runtimeConfig.whaleSettings })
           } catch (err) {
             const code = err && err.statusCode === 413 ? 413 : 400
@@ -3022,15 +4133,28 @@ export function apply(ctx, config) {
             // 用户一点"保存并生效"就把自己存的阈值覆盖掉了。补上。
             safeThreshold: runtimeConfig.safeThreshold,
             warnThreshold: runtimeConfig.warnThreshold,
+            dailyLimit: runtimeConfig.dailyLimit,
+            alertRepeatHours: runtimeConfig.alertRepeatHours,
             overseasCurrency: runtimeConfig.overseasCurrency,
             whaleEnabled: !!runtimeConfig.whaleEnabled,
             showNoBalanceBrands: !!runtimeConfig.showNoBalanceBrands,
+            showSubagentCapsules: !!runtimeConfig.showSubagentCapsules,
             officialProviders: runtimeConfig.officialProviders,
             // 只读: 供设置面板显示「自动判定结果」, 让用户知道哪些还需要手填
             providerKinds: readProviderKinds(),
             // v1.4.0「真自动」: 从 settings.yaml 自动发现的 provider 及启用状态 (不含 key)
             dshProviders: readDshProviderStatus(),
             dshProviderOptOut: runtimeConfig.dshProviderOptOut,
+            version: PLUGIN_VERSION,
+            preview: IS_PREVIEW,
+            updateRef: UPDATE_REF,
+            previewChannel: PREVIEW_CHANNEL,
+            // v1.6.0: 「充值入口」页签的数据源 —— 全部有开放平台地址的平台(含无余额接口的品牌)。
+            // 单独下发而不是让客户端从 balances 里扒: 那些平台可能因为没配 key、或用户关了
+            // 「显示模型品牌」而不出现在看板上, 但充值入口照样要给。
+            consoleTargets: PLATFORM_PRESETS.filter(p => p.consoleUrl).map(p => ({
+              id: p.id, name: p.label, category: p.category, url: p.consoleUrl,
+            })),
           })
           return
         }
@@ -3038,6 +4162,15 @@ export function apply(ctx, config) {
           try {
             let body = await readBody(req)
             body = body ? JSON.parse(body) : {}
+            // 纯开关保存不等待外部余额网络；先落盘成功再提交内存。
+            const toggleFields = ['showSubagentCapsules', 'whaleEnabled', 'showNoBalanceBrands']
+            const keys = Object.keys(body)
+            if (keys.length && keys.every(k => toggleFields.includes(k) && typeof body[k] === 'boolean')) {
+              if (!savePersistedState(body)) return sendJson(res, 500, { ok: false, error: 'settings-save-failed' })
+              Object.assign(runtimeConfig, body)
+              cache.config = { ...cache.config, ...body }
+              return sendJson(res, 200, { ok: true, ...body })
+            }
             // 数组规模上限: 状态文件与每次轮询都要带它们, 防垃圾数据无限膨胀
             const MAX_ITEMS = 64
             const cleanId = (v) => cleanStr(v, 64).replace(/[^a-zA-Z0-9_-]/g, '')
@@ -3072,6 +4205,10 @@ export function apply(ctx, config) {
             }
             // 更新安全阈值
             if (typeof body.safeThreshold === 'number' && body.safeThreshold >= 0) runtimeConfig.safeThreshold = body.safeThreshold
+            // v1.6.2: 今日花销阈值(0 = 关闭) —— 负数/NaN 一律当关闭, 别让脏值进状态文件
+            if (typeof body.dailyLimit === 'number' && Number.isFinite(body.dailyLimit) && body.dailyLimit >= 0) runtimeConfig.dailyLimit = body.dailyLimit
+            // v1.6.8: 重复提醒间隔(小时); 0 = 关闭。脏值走 clampAlertRepeatHours 一律落 0, 别进状态文件
+            if (body.alertRepeatHours !== undefined) runtimeConfig.alertRepeatHours = clampAlertRepeatHours(body.alertRepeatHours)
             if (typeof body.warnThreshold === 'number' && body.warnThreshold >= 0) runtimeConfig.warnThreshold = body.warnThreshold
             if (typeof body.currency === 'string' && body.currency.trim()) runtimeConfig.currency = body.currency.trim().toUpperCase()
             // v1.3.2: 海外模型独立计价货币, 只接受白名单三值 (脏值一律落回 follow, 不放行任意字符串)
@@ -3083,6 +4220,7 @@ export function apply(ctx, config) {
             if (typeof body.whaleEnabled === 'boolean') runtimeConfig.whaleEnabled = body.whaleEnabled
             // 显示无余额模型品牌
             if (typeof body.showNoBalanceBrands === 'boolean') runtimeConfig.showNoBalanceBrands = body.showNoBalanceBrands
+            if (typeof body.showSubagentCapsules === 'boolean') runtimeConfig.showSubagentCapsules = body.showSubagentCapsules
             // 官方直连 provider 名单 (第 1 层判定); 接受数组或逗号/换行分隔的字符串
             if (Array.isArray(body.officialProviders) || typeof body.officialProviders === 'string') {
               runtimeConfig.officialProviders = normalizeOfficialProviders(body.officialProviders)
@@ -3102,8 +4240,11 @@ export function apply(ctx, config) {
               overseasCurrency: runtimeConfig.overseasCurrency,
               safeThreshold: runtimeConfig.safeThreshold,
               warnThreshold: runtimeConfig.warnThreshold,
+              dailyLimit: runtimeConfig.dailyLimit,
+              alertRepeatHours: runtimeConfig.alertRepeatHours,
               whaleEnabled: runtimeConfig.whaleEnabled,
               showNoBalanceBrands: runtimeConfig.showNoBalanceBrands,
+              showSubagentCapsules: runtimeConfig.showSubagentCapsules,
               officialProviders: runtimeConfig.officialProviders,
               dshProviderOptOut: runtimeConfig.dshProviderOptOut,
             })
@@ -3117,10 +4258,15 @@ export function apply(ctx, config) {
               overseasCurrency: runtimeConfig.overseasCurrency,
               whaleEnabled: !!runtimeConfig.whaleEnabled,
               showNoBalanceBrands: !!runtimeConfig.showNoBalanceBrands,
+            showSubagentCapsules: !!runtimeConfig.showSubagentCapsules,
               officialProviders: runtimeConfig.officialProviders,
               providerKinds: readProviderKinds(),
               dshProviders: readDshProviderStatus(),
               dshProviderOptOut: runtimeConfig.dshProviderOptOut,
+              version: PLUGIN_VERSION,
+              preview: IS_PREVIEW,
+              updateRef: UPDATE_REF,
+              previewChannel: PREVIEW_CHANNEL,
             })
           } catch (err) {
             const code = err && err.statusCode === 413 ? 413 : 400
@@ -3132,6 +4278,101 @@ export function apply(ctx, config) {
         res.end()
       },
     }), 'dsh-api-dashboard: config route')
+
+    // v1.4.6: 告警通道状态 —— 供界面做"可见降级" (issue #2 问题 3)。
+    // 通道不可用(拿不到 3090 桥 token / 桥拒绝)时, 用户至少能在设置面板看到"通知发不出去",
+    // 而不是继续以为会收到 —— 这正是 issue 里点名的那个错位。
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact', path: '/api-dashboard/alerts',
+      async handler(req, res) {
+        if (!allowRequest(req, res)) return
+        if (req.method !== 'GET') { res.writeHead(405, { Allow: 'GET' }); res.end(); return }
+        // v1.5.1: 第一次被问到时懒探测一次通道 (只读 /app/version, 不弹通知)。
+        // 之后 alertChannelProbed 置位, 不再产生任何额外请求。
+        await probeAlertChannel()
+        sendJson(res, 200, {
+          ok: true,
+          channel: alertStatus.channel,   // 'unknown' | 'app-bridge' | 'none'
+          checkedAt: alertStatus.checkedAt,
+          sent: alertStatus.sent,
+          // v1.6.8: App 在前台时桥会跳过通知(FOREGROUND_SKIP, 也是 200) —— 那种情况我们改发
+          // App 内提示, 必须**单独计数**, 不能混进 sent, 否则面板又会显示"已送达"而用户什么都
+          // 没看见(2026-09-29 真机就是这么被假成功带偏的)。
+          skipped: alertStatus.skipped,
+          failed: alertStatus.failed,
+          lastDelivery: alertStatus.lastDelivery,  // 'notify' | 'toast' | 'failed' | null
+          last: alertStatus.last,
+          safeThreshold: runtimeConfig.safeThreshold,
+          warnThreshold: runtimeConfig.warnThreshold,
+          alertRepeatHours: runtimeConfig.alertRepeatHours,
+        })
+      },
+    }), 'dsh-api-dashboard: alerts route')
+
+    /**
+     * v1.6.8: 「发送测试提醒」—— 设置面板那个按钮。
+     *
+     * 为什么要有它: 提醒能不能真正落到你眼前, 取决于**系统侧**(App 的通知权限, 部分机型还要在
+     * 「提醒方式 / 通知类别」里选一项), 插件这边怎么探都看不出来 —— 真机排查时只能反复等一条
+     * "余额告警"。给个按钮自测最直接。前台会被桥跳过 → deliverAlert 自动改发 App 内提示,
+     * 所以前/后台都有反馈。
+     */
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact', path: '/api-dashboard/alerts/test',
+      async handler(req, res) {
+        if (!allowRequest(req, res)) return
+        if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }); res.end(); return }
+        const delivery = await deliverAlert('哦鲸鲸 · 测试提醒', '这是设置面板里点的测试提醒；能收到就说明余额告警也能送达。')
+        sendJson(res, 200, {
+          ok: true,
+          delivery,                    // 'notify' | 'toast' | 'failed'
+          channel: alertStatus.channel,
+          sent: alertStatus.sent,
+          skipped: alertStatus.skipped,
+          failed: alertStatus.failed,
+        })
+      },
+    }), 'dsh-api-dashboard: alerts test route')
+
+    /**
+     * v1.6.0: 打开某平台的开放平台 / 充值页 (「去充值」按钮)。
+     *
+     * 🔴 安全要点: **只认平台键, 不认任意 URL**。客户端传的 url 一律忽略,
+     * 地址由服务端从 PLATFORM_PRESETS 查表 —— 否则这个端点就是现成的开放重定向跳板
+     * (任何人都能拿它当「从你机器上打开任意链接」的接口, 顺手配合 file:// 之类还能再进一步)。
+     *
+     * 打开方式两档:
+     *  - 手机 DSHA: 走 App 桥 /app/open (webview 里 window.open 开不出外部浏览器)
+     *  - 桌面/浏览器: 桥调不通 → 回 { via: 'browser' } 并带上白名单地址, 由客户端 window.open
+     */
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact', path: '/api-dashboard/open',
+      async handler(req, res) {
+        if (!allowRequest(req, res)) return
+        if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }); res.end(); return }
+        let id = ''
+        try {
+          const body = await readBody(req)
+          id = String(JSON.parse(body || '{}').platform || '').trim()
+        } catch { /* 坏 body 走下面统一的 400 */ }
+        const preset = PLATFORM_PRESETS.find(p => p.id === id)
+        if (!preset) return sendJson(res, 400, { ok: false, error: 'unknown-platform' })
+        const url = preset.consoleUrl
+        if (!url) return sendJson(res, 200, { ok: false, via: 'none', error: 'no-console-url', platform: preset.id })
+        try {
+          const fsp = await import('node:fs/promises')
+          const home = process.env.DSH_HOME || join(homedir(), '.dsh')
+          const token = (await fsp.readFile(join(home, '.bridge_token'), 'utf-8')).trim()
+          const resp = await fetch(
+            'http://127.0.0.1:3090/app/open?url=' + encodeURIComponent(url),
+            { headers: { 'X-Token': token }, signal: AbortSignal.timeout(3000) })
+          await resp.text()
+          if (resp.ok) return sendJson(res, 200, { ok: true, via: 'app-bridge', url, platform: preset.id })
+        } catch { /* 没桥(桌面/浏览器) → 回退给客户端开 */ }
+        // 回退: 地址仍是服务端查表得来的, 客户端只负责 window.open
+        sendJson(res, 200, { ok: false, via: 'browser', url, platform: preset.id })
+      },
+    }), 'dsh-api-dashboard: open route')
   })
 
   // 会话消耗投影

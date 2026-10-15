@@ -1,6 +1,6 @@
 {
   "name": "dsh-api-dashboard",
-  "version": "1.4.6",
+  "version": "1.7.0",
   "description": "DeepSeek Harness 多平台 API 余额 / 用量看板：输入框下方实时显示各平台余额与本会话估算消耗",
   "keywords": [
     "dsh",
@@ -23,7 +23,9 @@
     "cordis.patch.yml",
     "README.md",
     "LICENSE",
-    "assets"
+    "assets",
+    "docs/PRICING-20261010.md",
+    "docs/MARKETPLACE.md"
   ],
   "repository": {
     "type": "git",
@@ -34,25 +36,46 @@
   },
   "homepage": "https://github.com/133563825as-ai/dsh-api-dashboard#readme",
   "dsh": {
+    "update": {
+      "summary": "适配DSH 0.2.0-rc.2；更新前展示适配范围并复检；修复设置保存和响应提前关闭、子代理与主题；补录GPT6.1等六个标准档参考价格。",
+      "targets": [
+        "DSH / DSHA Web（0.1.x 与 0.2.x 声明范围）",
+        "手机、平板、桌面"
+      ]
+    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-conversation"
       ]
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.0-rc.2": "compatible",
+        "0.1.7-rc.2": "unknown",
+        "0.2.0": "unknown"
+      }
     }
   },
   "peerDependencies": {
+    "semver": "^7.8.5",
+    "@deepseek-ai/dsh": "^0.1.0-rc.6 || ^0.2.0-rc.2",
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.6 || ^0.1.6 || ^0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.0 || ^0.3.0-rc.1 || ^0.3.0 || ^0.4.0-rc.1 || ^0.4.0 || ^0.5.0-rc.1",
+    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.6 || ^0.1.6 || ^0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.0-rc.2 || ^0.2.0 || ^0.3.0-rc.1 || ^0.3.0 || ^0.4.0-rc.1 || ^0.4.0 || ^0.5.0-rc.1",
     "@deepseek-ai/schemastery": "^3.18.1",
     "zod": "^4.4.3"
   },
   "peerDependenciesMeta": {
+    "semver": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh": {
+      "optional": true
+    },
     "@deepseek-ai/cordis": {
       "optional": true
     },

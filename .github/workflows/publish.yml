@@ -16,6 +16,11 @@
 # 【发版方式】把 package.json 的 version 改好并提交后：
 #   git tag v1.3.2 && git push origin v1.3.2
 #   tag 必须是 v + package.json 里的版本号，不一致会被下面的校验拦住。
+#
+# 【GitHub Release 手工建（2026-09-29 起）】本流程**只发 npm**，不再建 Release：
+#   用内置 GITHUB_TOKEN 建的 Release 署名固定是 github-actions[bot]，维护者要求挂自己名下。
+#   发完 npm 后到该次 run 的 Summary 里复制现成的正文，再点
+#   https://github.com/133563825as-ai/dsh-api-dashboard/releases/new 建 Release（署名即本人）。
 
 name: publish
 
@@ -27,7 +32,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: read # 只需要读源码；建 Release 已移出 CI（见文件末尾注释），所以不再申请 write
   id-token: write # 可信发布必需：没有它 npm 拿不到 OIDC 身份
 
 jobs:
@@ -69,7 +74,7 @@ jobs:
             exit 1
           fi
 
-      # 零依赖是本插件的硬约束：引入 runtime 依赖会破坏宿主安装
+      # 保持零 dependencies；semver 作为宿主提供的 optional peer。
       - name: 校验 dependencies 为空
         run: |
           node -e "
@@ -99,10 +104,12 @@ jobs:
         run: |
           mkdir -p /tmp/peerdeps && cd /tmp/peerdeps
           npm init -y > /dev/null
-          npm i --no-fund --no-audit zod@4.5.2 '@deepseek-ai/schemastery@3.18.1'
+          npm i --no-fund --no-audit zod@4.5.2 semver@7.8.5 '@deepseek-ai/schemastery@3.18.1' '@deepseek-ai/dsh-app-boot@0.2.0-rc.2'
           cd "$GITHUB_WORKSPACE"
           mkdir -p node_modules/@deepseek-ai
           ln -sfn /tmp/peerdeps/node_modules/zod node_modules/zod
+          ln -sfn /tmp/peerdeps/node_modules/semver node_modules/semver
+          ln -sfn /tmp/peerdeps/node_modules/@deepseek-ai/dsh-app-boot node_modules/@deepseek-ai/dsh-app-boot
           ln -sfn /tmp/peerdeps/node_modules/@deepseek-ai/schemastery node_modules/@deepseek-ai/schemastery
           node --input-type=module -e "
             console.log('zod        →', await import.meta.resolve('zod'));
@@ -134,12 +141,60 @@ jobs:
       - name: 确认 package.json / lock 未被改动
         run: git diff --exit-code -- package.json package-lock.json
 
+      # v1.5.0-desktop-preview.1 起：**预发行 tag 不发 npm**。
+      # 预发行版本号推 tag 同样会触发本流程，而 npm 对没有 --tag 的预发行版本默认仍会挂到
+      # latest 上 —— 一次误推就把预览版变成了所有人的安装源。这里显式短路：
+      # 预发行 tag 只跑校验（版本一致性 / 零依赖 / 语法 / 全套测试 / 打包预演），发布步骤跳过。
+      - name: 预发行版本只校验、不发布
+        id: prerelease_guard
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          case "$PKG" in
+            *-*)
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "预发行版本 $PKG —— 跳过 npm 发布（本流程只做校验）"
+              ;;
+            *)
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              echo "正式版本 $PKG —— 继续发布"
+              ;;
+          esac
+
       # 无 token：npm CLI 用 GitHub 签发的 OIDC 身份向 registry 换取发布权限，并附带 provenance 溯源。
       # 失败时先看下面这行诊断 —— 若 _authToken 非空说明又被什么东西注入了凭据（见「准备 Node」的注释）。
       - name: 发布到 npm
+        if: steps.prerelease_guard.outputs.skip != 'true'
         run: |
           echo "OIDC 可用: ${ACTIONS_ID_TOKEN_REQUEST_URL:+是}${ACTIONS_ID_TOKEN_REQUEST_URL:-否}"
           echo "userconfig: ${NPM_CONFIG_USERCONFIG:-(未设置)}"
           echo "npm 认证配置（应为空）:"
           npm config get //registry.npmjs.org/:_authToken || true
           npm publish --provenance --access public --registry=https://registry.npmjs.org
+
+      # ⚠️ 2026-09-29 维护者决定：**CI 不再创建 GitHub Release**。
+      # 原因：用内置 GITHUB_TOKEN 建出来的 Release，署名固定是 `github-actions[bot]`
+      # （GitHub 的规则，没有开关可改），而维护者希望发行版挂在自己名下 ——
+      # v1.5.0 及更早都是手工建的，署名就是本人；v1.6.1~v1.6.7 由本步骤自动建，署名全变成 bot。
+      # 想恢复自动建只有两条路：① 仓库里放一个 `contents: write` 的 PAT（与「仓库不存任何密钥」的设计相反）；
+      # ② 就是现在这样：**Release 由维护者手工建**。
+      # 这一步只把 CHANGELOG 里该版本的段落写进 Job Summary，手工建 Release 时直接复制 ——
+      # 不需要任何 token，也不再需要 `contents: write` 权限。
+      - name: 生成 Release 正文（供手工建 Release 用）
+        if: steps.prerelease_guard.outputs.skip != 'true'
+        run: |
+          V="$GITHUB_REF_NAME"; VV="${V#v}"
+          # 正文取 CHANGELOG 里该版本的段落 —— 我们的 CHANGELOG 是"一版一行"的真源。
+          # 不用 --generate-notes：本项目直接推 main、没有 PR，gh 只能生成一行 compare 链接。
+          node -e 'const fs=require("fs");const v=process.argv[1];const L=fs.readFileSync("CHANGELOG.md","utf8").split("\n");const o=[];let on=false;for(const l of L){const h=/^- \*\*v[\d.]+/.test(l);if(h){if(on)break;if(l.startsWith("- **v"+v+"**")){on=true;o.push(l.replace(/^- \*\*/,"**"));continue}}if(on)o.push(l)}fs.writeFileSync("/tmp/notes.md",o.join("\n").trim())' "$VV"
+          if [ -s /tmp/notes.md ]; then
+            {
+              echo "## $V 的 Release 正文"
+              echo
+              echo "手工建 Release：https://github.com/$GITHUB_REPOSITORY/releases/new?tag=$V"
+              echo "（CI 建会署名 github-actions[bot]，所以这一步留给维护者本人）"
+              echo
+              cat /tmp/notes.md
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::CHANGELOG 里没有 v$VV 的段落，手工建 Release 时请自行撰写正文"
+          fi

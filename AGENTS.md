@@ -7,6 +7,8 @@
 
 ## 一、这是什么
 
+> v1.7.0 维护补充：复用宿主 `semver`（optional peer）用于严格更新范围验证，不能以手写比较替代范围匹配；保持零 dependencies。投影 stateVersion=6 保存 own.byDay；冷读取接受已知 v3–v6，未来版本不盲读。旧 fork 缺自身日桶只可标不完整/跳过，不能累加 full 继承历史。发布前检查 Release body 与 manifest `dsh.update.targets`，不能宣称未验收版本已实测。
+
 `dsh-api-dashboard` 是 **DeepSeek Harness 专用** 的多平台 API 余额/用量看板插件。
 深度绑定 DSHA Web 框架：`conversation.composer.dock` slot、`sessionProjections`、`webServer` 路由、`credentials` 凭证。
 **仅能运行在 DeepSeek Harness（手机版 DSHA / 桌面版）里**，任何其他环境无法加载。
@@ -136,6 +138,50 @@ DSH 启动时会把 profile 的 `dsh.profile.bundles` **逐个 import**，只要
 
 ---
 
+> - 🕐 **峰谷按「事件发生时刻」计价，不按「查看时刻」（2026-09-22 修复）**：投影状态新增 `phaseBuckets`。
+>   `foldUsage` 用事件自带的 **`time`** 字段判定这笔用量属于峰还是谷，分相累积；`summarize` 再按峰/谷两套单价相加。
+>   旧实现只在 `summarize` 时取 `Date.now()`，等于把整段历史消耗都按「你打开面板那一刻」的时段计价 ——
+>   **谷时跑的 token 在峰时查看会被翻倍，反之漏掉一半**（DeepSeek 峰谷差整整 2 倍，本插件主力模型就是它）。
+>   `resolveModelPrice` 增加了第 4 个参数 `phase`（`'peak'` / `'offPeak'`），传 null 才是老的「按 timestamp 判定」行为。
+>   `stateVersion` 随之 **3 → 4**：版本不匹配时框架从 `seq 0` 重放，重放时 `event.time` 仍在，所以分相结果正确；
+>   读不到分相的老缓存（冷路径）会**自动回落旧行为**，不会崩也不会显示错数字。
+>   改这块务必跑 `test-cost-projection.mjs` 的 **T11**（峰谷混合用例：1M@峰 ¥8 + 1M@谷 ¥4 = ¥12，与跑测试的时刻无关；旧实现恒不等于 12）。
+> - 📅 **法定节假日全天算谷时**：官方**英文**定价页写明 peak 是 `"Monday through Friday, excluding Chinese public holidays ... including Chinese public holidays in full"`（中文页只写「其余为空闲时段」，容易漏掉这半句）。
+>   表在 `src/index.js` 的 `CN_HOLIDAY_RANGES`（2026 年 7 个区间，来源：国务院办公厅 2025-11-04 通知 `gov.cn/zhengce/zhengceku/202511/content_7047091.htm`）。
+>   ⚠️ **每年 11 月国务院办公布次年安排后必须补表**；未收录年份按「无节假日」回落（保守）。
+>   漏掉这条会在全年 **33 天**假期里把消耗按峰价高估一倍。调休上班的周末不列入表内 —— 官方口径是 `Monday through Friday` 字面，周末本身已是谷时。
+>   回归钉子：`test-cost-projection.mjs` 的 **T13 / T13b~T13g**（含「普通工作日仍须判峰时」与「表外年份不误判」两条防误伤断言）。
+> - 🧭 **2026-09-22 国内价格复核结论**：DeepSeek / 智谱 / 阿里百炼 / MiniMax / 阶跃 / Kimi 六家已逐条对官方原文核对，现有条目**基本准确**；
+>   已补录 15 条（GLM-5.3-FlashX、GLM-5、GLM-4.7 系、GLM-4.5-Air、GLM-4-Long、GLM-4-FlashX、MiniMax-M3、step-5-preview、step-1o-turbo-vision、qwen3.8-max-prime、qwen3.8-omni-flash、qwen3.5-plus 等）。
+>   ⚠️ 修掉一个真实键名错配：官方 `GLM-4-Flash-250414` 是**免费**，`GLM-4-FlashX-250414` 才是 ¥0.1/¥0.1 —— 旧表把后者的价挂在前者键上，而 `glm-4-flashx-250414` 没有任何键能收它，一直落到 `defaultPrices`（USD $1/$2 ≈ ¥7/¥14）。
+>   ⚠️ 官方已下线、仅作估算占位的条目：`moonshot-v1-*` 与 `kimi-k2.5`（2026-08-31 全平台下线，调用 404）、`qwen2.5-72b-instruct`（2026-05-13 下线）。
+> - 🌏 **海外取证进展（2026-09-22）—— OpenAI / Anthropic 已拿下官方原文，且不需要代理**：
+>   关键技巧：这两家的价格**不在 `<table>` 里**，而是藏在页面 `<script>` 的**双层转义 JSON** 中，
+>   而本容器内 chromium 无网络渲染不了。直接 fetch 页面后**依次还原**（双反斜杠→单反斜杠、`\n`→换行、`\"`→`"`）即可拿到官方值：
+>   OpenAI 形如 `"pricingGroups":[... "Input:\n$X / 1M tokens\n\nCached input:\n$Y ...\n\nOutput:\n$Z" ...]`；
+>   Anthropic 在 `ApiTab-module__*__priceLabel` 之后，且**额外给出 Prompt caching 的 Read / Write 两档**。
+>   ✅ 实测结论：OpenAI `gpt-5.6-sol` 官方现价 **$5 / $0.5 / $30**（旧值 4/20 记的是"促销价"，官方页已无促销标记 → 按红线改用官方现价）；
+>   同页新增 `gpt-6-astra` **$10 / $1 / $50**；`gpt-5.3-codex` 官方页**已不列**（仍为 radar 二手源）。
+>   ✅ Anthropic 现有 `claude-opus-5` / `sonnet-5` / `sonnet-4-6` / `haiku-4-5` 与官方**逐项一致**（未改动）；新增 `claude-fable-5.1` / `fable-5` / `opus-4-8` / `sonnet-4-5`。
+>   🔴 重要口径：Anthropic **缓存写价一律 = 输入价 ×125%**（Opus 5 $6.25/$5、Sonnet 5 $2.50/$2、Haiku 4.5 $1.25/$1、Fable 5.1 $12.50/$10 全部吻合）；
+>   缓存读价多数 = 输入 ×10%，**Fable 5.1 例外仅 2.5%**。这条是「缓存写入价未区分」那条待办的直接证据。
+> - 🌏 **Gemini 仍缺**：`ai.google.dev` / `cloud.google.com` 在本环境 **TCP 直连失败**（被墙）；
+>   `docs.claude.com` 返回 *"App unavailable in region"*、`platform.openai.com/docs/pricing` 403（但这两家已从别的官方入口拿到，见上）。
+>   **要取 Gemini 官方原文必须有代理/VPN；没拿到官方页就别改它的值**（红线：不许编造）。
+
+> - 📊 **「今日总结」是跨会话汇总，去重全靠 `seen`（v1.6.7 血泪，改前必读）**：
+>   `collectTodayCost`（`src/index.js`）依次取 ① 自己（`selfState`）→ ② 宿主常驻会话 `sessions.list()` → ③ 投影缓存目录里的冷会话。
+>   ⚠️ **`sessions.list()` 返回的是「全部常驻会话」，当前这个会话就在里面**（`SessionStore.list()` = `[...store.values()].map(e => e.session)`）；
+>   而当前会话的投影缓存文件**也同时在 ③ 的目录里**。所以 ②/③ 两处都必须先查 `seen` 再累加：
+>   v1.6.2~v1.6.6 的 ② 只写了 `seen.add(id)` 却没 `continue`，当前会话被算两次 → **今日花销 = 本会话 ×2.000**
+>   （真机：状态条 ~¥1.26 / 今日总结 ¥2.53）。`seen` 是**去重账本**，登记与累加必须是同一个判断的两个分支。
+>   ⚠️ 兜底那条也别删：`state.sessionId` 拿不到时按 **对象身份**（`st === selfState`）认自己，否则同样翻倍。
+>   ⚠️ 这个数字**没有任何 UI 能自证对错**（只跟状态条对比才看得出 ×2），必须靠 `test/test-today-cost.mjs` 钉住；
+>   写这类夹具时计价桩**只能用当日桶里的数字**，别用对象身份做映射 —— 冷会话是 JSON 读回来的，身份过不了序列化，
+>   金额会静默变 0 而 token 照加，夹具看起来还在跑、其实已经失真。
+
+---
+
 ## 四、维护铁律（改代码前必读）
 
 1. **先备份再改**：改 `client/client.js` 或 `src/index.js` 前，先 `tar` 一份 / 存回退点。用户习惯 A/B 对比+回滚。
@@ -151,6 +197,12 @@ DSH 启动时会把 profile 的 `dsh.profile.bundles` **逐个 import**，只要
    ⚠️ **别再试 `npm publish` + token/OTP**：npm 已限制「绕过 2FA 的 token」用于直接发布
    (https://gh.io/npm-gat-bypass2fa-deprecation)，Granular / Automation token 加 `--otp` 在开启 2FA
    的账号上均实测失败（web 登录成功后 publish 仍报 EOTP）。
+   ⚠️ **GitHub Release 由维护者手工建，CI 不建（2026-09-29 起，维护者明确要求）**：用内置 `GITHUB_TOKEN`
+   建的 Release 署名固定是 `github-actions[bot]`（GitHub 规则，无开关），维护者要求发行版挂自己名下 ——
+   v1.5.0 及更早都是手工建（署名本人），v1.6.1~v1.6.7 自动建那一批署名全成了 bot。
+   现在 workflow 最后一步只把 CHANGELOG 段落写进 **run 的 Summary**，供手工建 Release 时复制；
+   别「顺手把 `gh release create` 加回去」，那会把署名又变成 bot。
+   要真正恢复自动建，只有「仓库里放 `contents: write` 的 PAT」这一条路，与零密钥设计冲突，**改前先问维护者**。
 8. **测试必须以退出码表达结果**：`test/*.mjs` 结尾都有 `if (fail > 0) process.exitCode = 1`。
    新增测试脚本别忘了加，否则 CI 里断言失败也会被当成通过。
    ⚠️ **测试不许读运行机器上的私有文件**：`test-provider-kinds.mjs` 原来直读 `~/.dsh/settings.yaml`，
@@ -164,8 +216,8 @@ DSH 启动时会把 profile 的 `dsh.profile.bundles` **逐个 import**，只要
 
 ## 五、自动更新机制（v0.6.0+)
 
-- `GET /api-dashboard/update`：对比 GitHub main 的 package.json version，5 分钟缓存。
-- `POST /api-dashboard/update/install`：下载→校验→备份→原子替换→失败回滚，重启生效。
+- v1.7.0：`GET /api-dashboard/update` 正式频道只读已发布非预发行 Release 的 tag manifest，预览频道继续读自身 ref；返回摘要、适配对象、全部 DSH peer/engine 范围和兼容状态，5 分钟缓存。
+- `POST /api-dashboard/update/install` 必须提交 GET 返回的 `expectedVersion` 与 `confirmationToken`；服务端重新读取 manifest/runtime，拒绝不兼容、未知、目标变化和并发更新；解包后比对完整 manifest，再次兼容校验及 JS 语法预检，最后备份/覆盖，重启生效。替换仍是旧覆盖机制，不宣称断电原子性；宿主锁仍仅探测，不是真持锁。
 - 改代码时别破坏这两个端点；`applyUpdate` 有 `remoteVersion`/`localTarball` 测试注入口。
 
 ---
@@ -194,6 +246,8 @@ DSH 启动时会把 profile 的 `dsh.profile.bundles` **逐个 import**，只要
 ### 仍未完成
 - [ ] 推送前自检：文件树无 `.dsh/`、无本地状态文件、无任何 API key（**推送需仓库维护者授权，代理不得擅自推**）
 - [ ] 验证 B 栏（OpenRouter/siliconflow/Novita/one-api/xAI）的真实字段，修正解析（**需真实 key**）
+- [ ] **缓存写入价未区分（已知简化，2026-09-22 记录）**：`summarize` 把 `cacheWriteTokens` 并进 `cacheMiss` 按**标准输入价**算，但官方普遍按输入的 **125%** 计（阿里显式缓存明文 125%、MiniMax 2.625/2.1=125%、Anthropic 1.25×），Kimi K3 更是另有独立写入费（TTL 5min ¥20 / 1M）。
+      对 DeepSeek **无影响**（其缓存为自动缓存，无单独写入费），而本插件主力就是 deepseek-flash，故暂未实现；改用 Anthropic/阿里为主力时需重新评估。
 - [ ] `glm-5-turbo` model id 官方确认（`model_id_mapping.json` 标 `confirmed: false`）
 - [ ] **重新取证「未核实」价格条目**（v1.4.0 逐条标了注释，均按 `×7` 保号迁移、显示值未跳变）：豆包 Seed 2.0 全系（火山方舟官方页是 SPA，`.md` 出口返回壳页）、腾讯混元三条、`kimi-k2.5`、`moonshot-v1-*`、`step-1-*`、`deepseek-chat/reasoner/r1` 三条占位价（与 DeepSeek 官方历史价对不上）
 - [ ] **海外三家官方定价页复核**：OpenAI / Anthropic / Gemini 在容器环境 403 或地域封锁，v1.4.0 未能取原文 —— `gpt-5.6-*` / `claude-*` / `gemini-3.*` 仍是 radar 二手源
@@ -244,7 +298,7 @@ DSH 启动时会把 profile 的 `dsh.profile.bundles` **逐个 import**，只要
 - **`parseProviderEntries` 必须把「有 `apiKeyEnv` 但没 `baseURL`」的 provider 也收进来**（本机 `xiaomi` / `opencode` 就是），否则设置面板没法如实告诉用户「这个没写 baseURL、不表态」。
 - 本机实测（8 个 provider）：入列 5 条 `dshzuoxhe` / `jiyuan` / `jiyuanlvdong` / `mimov` / `new`；`zhipu` 判 official 跳过；`xiaomi` / `opencode` 没写 baseURL 跳过。**`jiyuan` 与 `jiyuanlvdong` 共用同一个 baseURL 但 key 不同** —— 按「两个账号」处理、都保留，用户觉得重复可以自己关一个。
 
-### 🔒 五个「看着像小问题、其实有坑」的机制（v1.4.0，改前必读）
+### 🔒 六个「看着像小问题、其实有坑」的机制（v1.4.0 起，改前必读）
 
 #### ① 手机壳的「左边缘开侧边栏」手势会吃掉面板里的横滑（`.dshadb_swipeguard`）
 
@@ -384,6 +438,59 @@ horizontally scrollable container never reach this state at all*）：起手元�
   本轮清理时匹配片段漏了 `{ ` 前缀，把 `className: "dshadb_barwrap"` 一起删掉 → `createElement("span", {  })`，
   **语法照过、其余断言照绿**，但列布局会失效。已加结构完整性断言钉住（类名必须在 + 不允许空属性对象）。
 
+#### ⑥ 余额告警的投递链路：**前台会被桥跳过**，收不到时该让用户去开什么（v1.6.8，改前必读）
+
+**链路**：服务端 `checkAlerts` → `deliverAlert` → 3090 桥 `/app/notify`（后台）→ 进通知栏。
+真机实测（2026-09-29）三种响应：
+
+| 场景 | 桥返回 | 含义 |
+|---|---|---|
+| App 在**后台** | `200 + {"result":"OK"}` | 真的进了通知栏 |
+| App 在**前台** | `200 + {"result":"FOREGROUND_SKIP"}` | **没投递**（桥主动跳过，免得打断你正在看的界面） |
+| 无 token / 桥不可达 | 非 2xx 或连不上 | 发不出去 |
+
+- 🔴 **红线：绝不能只看 HTTP 200 就记"已发送"**。`FOREGROUND_SKIP` 也是 200 —— v1.4.6~v1.6.7 就是这么把它
+  记进 `sent` 的，于是面板显示「通道可用 / 已送达」而用户屏幕上什么都没有。真机那条 15:30 的告警就是这么
+  "消失"的，排查时还被这个**假成功**带偏到系统通知设置方向。现在按响应体分类（`classifyBridgeReply`），
+  前台跳过 → **自动改发 App 内提示**（`/app/toast`），三种结果**分开计数**（sent / skipped / failed）。
+- 策略：跨档（正常→偏低 / 偏低→不足）**立即**提醒；停在低档时按 **`alertRepeatHours`**（默认 6 小时，0 = 关闭重复，
+  上限 168）重复提醒，文案带「（仍未处理，再次提醒）」。判定是纯函数 `planAlert`（`test/test-alert-plan.mjs` 钉住）。
+- 告警状态（上次档位 + 上次提醒时刻）**持久化**在状态文件的 `alertState`（已登记进 `OBJECT_FIELDS` 消毒表）——
+  否则每次重启都会把所有低余额平台重新提醒一遍，冷却也失去意义。
+- ⚠️ **探测通道只能用只读的 `/app/version`**，别拿 `/app/notify` 去"测通知"（会在用户手机上真弹一条）。
+- **系统侧是插件探不到的**：App 的通知权限、以及**部分机型还要在「提醒方式 / 通知类别」里选一项**
+  （真机实测：只开总开关、没选提醒方式时，通知栏一条都收不到）。所以 v1.6.8 加了
+  **「发送测试提醒」按钮**（`POST /api-dashboard/alerts/test`，前台自动落到 App 内提示）并把引导写在设置面板上：
+  **系统设置 → 应用 → DSHA → 通知：打开「允许通知」+ 选好「提醒方式」**。别把这类"用户没开通知"当成插件 bug 去改代码。
+- ⚠️ **v1.6.9 补的分诊**：「测试提醒显示发送失败」**未必**是桥的问题 —— 先确认服务端跑的是哪个版本。
+  **插件文件更新了、dsh 没重启**时，客户端半身刷新后已有按钮，服务端半身仍是旧进程、**路由压根不存在**，
+  POST 打空 → 旧客户端一律报「发送失败」，把人带偏到系统通知设置。现在 404 / 非 JSON 单独归为 `stale`，
+  文案直指「服务端仍是旧版本（重启 dsh 后这个按钮才可用）」（`settings.alertTestStale`，中英成对，C13 钉住）。
+  🔎 **判定运行版本的硬证据**（本机实测过，别只看启动日志）：状态文件 `$DSH_HOME/dsh-api-dashboard.json`
+  的字段集 = **写盘那一刻的代码**认识的字段集。真机那次它只有 v1.6.5 的字段（无 `alertRepeatHours` / `alertState`），
+  而文件 mtime 在插件更新之后 —— 这就足以断定"服务端还在旧版本"，不必去重启进程做实验。
+
+#### ⑦ 数字输入框：别在 onChange 里当场夹取（v1.6.9）
+
+**症状**（维护者原话）：「那个数字填写，要先写后一个数字才能把前面的数字去掉」。
+
+**根因**：`onChange: (e) => setAlertRepeat(Math.min(Math.max(Math.round(Number(e.target.value) || 0), 0), 168))`
+—— 而 `Number("") === 0`。用户把旧数字删空的那一瞬间 state 就变成 `0`，受控 input 立刻把 `0` 写回、
+光标被顶到末尾，于是**旧数字根本删不掉**。
+
+**修法（五处同款，别只改一处）**：`numberDraft`（输入期：只留数字、**允许空串**、位数封顶）+ `settleNumber`
+（失焦/保存：夹取，空串走 fallback）。`client/client.js` 的刷新间隔 / 今日花销 / 重复提醒间隔 / 安全阈值 /
+预警阈值全部接线，`save()` 里也用规范化后的值提交（不再 `Number(x) > 0 ? x : 0`）。
+
+⚠️ **空串的 fallback 绝不能是 0**：`alertRepeatHours = 0` = **关掉重复提醒**、`dailyLimit = 0` = 关掉今日花销提醒。
+把一次"清空"静默变成"关掉提醒"，用户永远等不到那条提醒、面板上也看不出异常 —— 比填错严重得多。
+⚠️ **数值语义一个字都没动**（刷新 1~60s、重复间隔 0~168h、阈值 min 0、输入框 `min`/`max` 属性原样）：
+`test-v141-fixes.mjs` 的 C1（1 秒下限四处一致）拆成"输入期不夹取 + 失焦夹取仍以下限 1 秒"两条，红线照旧。
+⚠️ **这类 bug 要渲染级测试才拦得住**：`test-number-input.mjs` 用假 React/DOM 垫片**直接调用**
+`SettingsModal({isOpen:true,…})`（函数组件就是函数，别指望垫片的 `createElement` 会渲染它），
+按 `props.value === 6` 找到那个框、触发 `onChange({target:{value:""}})`，
+断言 `setState` 收到的是 `""` 而不是 `0` —— 旧实现在这条上必红。
+
 ### 🧩 子代理消耗是怎么算出来的（v1.4.0 引入并修冷会话，改这块前必读）
 
 投影 `queryBalanceCost` 只折叠**本会话**的事件。子代理跑在自己的**子会话**里，所以它的消耗不在主板数字里 —— 这是设计使然，不是 bug。子代理那一行是**旁路读出来的**。
@@ -393,7 +500,7 @@ horizontally scrollable container never reach this state at all*）：起手元�
 
 **热路径（首选，数据更新鲜）**
 1. `init(header, inheritedEventCount)` 把 `header.id` 存进投影状态的 `sessionId`（子代理汇总要拿它去查 `subagentCatalog`），
-   同时记下 fork 继承边界（见下方第 8 条）。**状态字段一改就要继续 bump `stateVersion`**（现为 **3**）。
+   同时记下 fork 继承边界（见下方第 8 条）。**状态字段一改就要继续 bump `stateVersion`**（现为 **4**）。
 2. `ctx.sessions.get(id)` → `sessionProjections.snapshot(session, ['subagentCatalog'])` 拿**直接子会话列表** —— 顺序就是父会话的 catalog 事件顺序（= 创建顺序），客户端**不重排**。
 3. 每个子会话用 `stateOf(childSession, 'queryBalanceCost')` 取**同一个 unit 的状态**，喂给**同一个 `summarize()`** —— 保证与主板数字口径一致（峰谷 / 原生币种 / 缓存分桶）。
 
@@ -414,7 +521,7 @@ horizontally scrollable container never reach this state at all*）：起手元�
    （`dsh-session-projection` 的 `buildCell`/`restore` 都传第二个参数）。框架自己的
    `subagentCatalog` 投影用的就是同一套判据：`if (event.type !== 'subagent/catalog' || event.seq < state.inheritedEventCount) return state`。
    ⚠️ 拿不到边界（`ownBoundaryKnown` 为假）时**宁可显示等待，也不要退回 full** —— 显示错的数字比不显示更糟。
-9. `stateVersion` 已 bump 到 **3**，v3 的状态自带 `own`。改状态字段记得继续 bump。
+9. `stateVersion` 已 bump 到 **4**（v3 自带 `own`；**v4 新增 `phaseBuckets` 做峰谷分相**，见第三节末尾）。改状态字段记得继续 bump。
    ⚠️ **但冷路径不能只看版本号就判"等待"**（v1.4.3 就是这么栽的）：老框架**不会**再给已经结束的子会话
    重写缓存，于是升级后**所有旧缓存行永远显示 `~—`**（真机实测 47 行里 46 行是旧版）。旧缓存其实能精确
    还原**非分叉**子会话：缓存记录的 `identity` 里就记着 `isSeeded` / `inheritedEventCount` ——
